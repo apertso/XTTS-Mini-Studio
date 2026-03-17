@@ -7,14 +7,14 @@ import traceback
 
 from flask import Flask, Response, jsonify, request, send_file
 
-from .config import FRONTEND_DIR, TTS_HOST, TTS_PORT, configure_stdio
+from .config import TTS_HOST, TTS_PORT, configure_stdio
 from .core import format_log_preview, generate_tts, get_sample_rate
 from .voices import REFERENCE_VOICES, list_available_voices
 
 
 configure_stdio()
 
-app = Flask(__name__, static_folder=str(FRONTEND_DIR), static_url_path="/frontend")
+app = Flask(__name__)
 
 
 @app.after_request
@@ -30,11 +30,6 @@ def wrap_chunk_with_metadata(chunk_index: int, total_chunks: int, audio_bytes: b
         {"c": chunk_index, "t": total_chunks, "s": len(audio_bytes)}
     ).encode("utf-8")
     return struct.pack("<I", len(metadata)) + metadata + audio_bytes
-
-
-@app.route("/")
-def index():
-    return send_file(FRONTEND_DIR / "index.html")
 
 
 @app.route("/api/voices", methods=["GET"])
@@ -145,4 +140,3 @@ def health():
 
 def start_flask() -> None:
     app.run(host=TTS_HOST, port=TTS_PORT, debug=False, threaded=True)
-

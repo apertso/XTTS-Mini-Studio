@@ -6,7 +6,6 @@ from pathlib import Path
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-FRONTEND_DIR = BASE_DIR / "frontend"
 VOICE_REFERENCES_DIR = BASE_DIR / "assets" / "voice_references"
 VOICE_REFERENCES_MANIFEST_PATH = VOICE_REFERENCES_DIR / "manifest.json"
 
