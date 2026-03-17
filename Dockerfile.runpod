@@ -1,0 +1,21 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TTS_MODE=runpod \
+    XTTS_MODEL_DIR=/models/xtts_v2
+
+WORKDIR /app
+
+COPY requirements.runpod.txt /app/requirements.runpod.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r /app/requirements.runpod.txt
+
+COPY main.py /app/main.py
+COPY tts /app/tts
+COPY assets/voice_references /app/assets/voice_references
+
+# Copy XTTS model files
+COPY models/xtts_v2 /models/xtts_v2
+
+CMD ["python", "main.py"]

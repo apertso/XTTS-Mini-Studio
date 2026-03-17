@@ -1,0 +1,39 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TTS_MODE=local \
+    TTS_HOST=0.0.0.0 \
+    TTS_PORT=5000 \
+    XTTS_MODEL_DIR=/models/xtts_v2
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY requirements.api.txt /app/requirements.api.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r /app/requirements.api.txt
+
+# Copy application code
+COPY main.py /app/main.py
+COPY tts /app/tts
+
+# Copy voice references
+COPY assets/voice_references /app/assets/voice_references
+
+# Copy XTTS model files
+COPY models/xtts_v2 /models/xtts_v2
+
+# Expose API port
+EXPOSE 5000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')" || exit 1
+
+CMD ["python", "main.py"]

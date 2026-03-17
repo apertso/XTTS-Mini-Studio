@@ -1,0 +1,67 @@
+﻿skleika-full.sh
+tasks/
+project_code.txt
+models/
+
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE / editor settings
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.swp
+*.tmp
+*.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Node / frontend tooling
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+dist/
+build/
+coverage/
+.parcel-cache/
+.vite/
+*.tsbuildinfo
+
+# Runtime logs and generated local artifacts
+logs/
+*.log
+*.err
+*.out

@@ -1,0 +1,34 @@
+[
+  {
+    "id": "lila_tretikov",
+    "name": "Lila Tretikov",
+    "gender": "female",
+    "file": "lila_tretikov.wav",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Lila_Tretikov_voice.ogg",
+    "license": "CC0 1.0"
+  },
+  {
+    "id": "julie_etchingham",
+    "name": "Julie Etchingham",
+    "gender": "female",
+    "file": "julie_etchingham.wav",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Julie_Etchingham_voice.ogg",
+    "license": "CC BY-SA 4.0"
+  },
+  {
+    "id": "david_lammy",
+    "name": "David Lammy",
+    "gender": "male",
+    "file": "david_lammy.wav",
+    "source_url": "https://commons.wikimedia.org/wiki/File:David_Lammy_voice.ogg",
+    "license": "CC BY-SA 4.0"
+  },
+  {
+    "id": "david_harewood",
+    "name": "David Harewood",
+    "gender": "male",
+    "file": "david_harewood.wav",
+    "source_url": "https://commons.wikimedia.org/wiki/File:David_Harewood_voice.ogg",
+    "license": "CC BY-SA 4.0"
+  }
+]
