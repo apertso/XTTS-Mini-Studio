@@ -43,6 +43,25 @@ const decodeBase64ToBytes = (base64Audio) => {
     return bytes;
 };
 
+const fetchAudioFromUrl = async (audioUrl) => {
+    const normalizedUrl = String(audioUrl || "").trim();
+    if (!normalizedUrl) {
+        throw new Error("RunPod returned an empty audio URL.");
+    }
+
+    const response = await fetch(normalizedUrl);
+    if (!response.ok) {
+        throw new Error(`Failed to download RunPod audio (${response.status}).`);
+    }
+
+    const buffer = await response.arrayBuffer();
+    if (!buffer.byteLength) {
+        throw new Error("RunPod audio URL returned an empty payload.");
+    }
+
+    return new Uint8Array(buffer);
+};
+
 export const useTtsStudio = () => {
     const [text, setText] = useState("");
     const [voice, setVoice] = useState("");
@@ -324,12 +343,28 @@ export const useTtsStudio = () => {
                             );
                         }
 
-                        const audioBase64 = statusPayload.output?.audio_base64 || statusPayload.audio_base64;
-                        if (typeof audioBase64 !== "string" || !audioBase64.trim()) {
+                        const outputPayload = statusPayload.output && typeof statusPayload.output === "object"
+                            ? statusPayload.output
+                            : {};
+                        const outputError = outputPayload.error
+                            || statusPayload.error
+                            || statusPayload.message;
+                        if (typeof outputError === "string" && outputError.trim()) {
+                            throw new Error(outputError);
+                        }
+
+                        const audioBase64 = outputPayload.audio_base64 || statusPayload.audio_base64;
+                        const audioUrl = outputPayload.audio_url || statusPayload.audio_url;
+
+                        let wavBytes = null;
+                        if (typeof audioBase64 === "string" && audioBase64.trim()) {
+                            wavBytes = decodeBase64ToBytes(audioBase64);
+                        } else if (typeof audioUrl === "string" && audioUrl.trim()) {
+                            wavBytes = await fetchAudioFromUrl(audioUrl);
+                        } else {
                             throw new Error("RunPod completed but returned no audio.");
                         }
 
-                        const wavBytes = decodeBase64ToBytes(audioBase64);
                         wavBlob = new Blob([wavBytes], { type: "audio/wav" });
                         break;
                     }
