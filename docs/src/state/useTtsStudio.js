@@ -6,15 +6,13 @@ import {
     AUTOPLAY_CHUNK_THRESHOLD,
     DEFAULT_LANGUAGE,
     DEFAULT_READING_MODE,
-    RUNPOD_API_KEY,
-    RUNPOD_BASE_URL,
-    RUNPOD_ENDPOINT_ID,
     RUNPOD_FALLBACK_VOICES,
     RUNPOD_POLL_INTERVAL_MS,
     RUNPOD_TIMEOUT_MS,
     STORAGE_KEYS,
 } from "../constants.js";
 import { createAudioController } from "../audio/audioController.js";
+import { submitRunpodJob, checkRunpodStatus } from "../api/runpodProxy.js";
 import {
     clampPercent,
     concatUint8,
@@ -152,14 +150,8 @@ export const useTtsStudio = () => {
                     const hasSavedVoice = availableVoices.some((item) => item.id === savedVoice);
                     setVoice(hasSavedVoice ? savedVoice : fallbackVoice);
 
-                    const hasApiKey = Boolean(
-                        RUNPOD_API_KEY
-                        || (localStorage.getItem(STORAGE_KEYS.runpodApiKey) || "").trim(),
-                    );
                     setStatus({
-                        text: hasApiKey
-                            ? "Ready to synthesize via RunPod."
-                            : "RunPod mode ready. API key will be requested on first generate.",
+                        text: "Ready to synthesize via RunPod.",
                         tone: "idle",
                     });
                     return;
@@ -213,22 +205,6 @@ export const useTtsStudio = () => {
         localStorage.setItem(STORAGE_KEYS.language, language);
     }, [language]);
 
-    const resolveRunpodApiKey = useCallback(() => {
-        const configuredApiKey = (RUNPOD_API_KEY || "").trim();
-        if (configuredApiKey) return configuredApiKey;
-
-        const storedApiKey = (localStorage.getItem(STORAGE_KEYS.runpodApiKey) || "").trim();
-        if (storedApiKey) return storedApiKey;
-
-        const promptedApiKey = (window.prompt("Enter RunPod API key (rpa_...)") || "").trim();
-        if (!promptedApiKey) {
-            return "";
-        }
-
-        localStorage.setItem(STORAGE_KEYS.runpodApiKey, promptedApiKey);
-        return promptedApiKey;
-    }, []);
-
     const speak = useCallback(async () => {
         if (!text.trim()) {
             setStatus({ text: "Enter text before generating audio.", tone: "error" });
@@ -267,46 +243,20 @@ export const useTtsStudio = () => {
             try {
                 let wavBlob = null;
                 if (isRunpodMode) {
-                    const apiKey = resolveRunpodApiKey();
-                    if (!apiKey) {
-                        throw new Error("RunPod API key is required.");
-                    }
-
                     setStatus({ text: "Submitting RunPod job...", tone: "idle" });
                     setStreamProgress(10);
 
-                    const runResponse = await fetch(
-                        `${RUNPOD_BASE_URL}/${RUNPOD_ENDPOINT_ID}/run`,
-                        {
-                            method: "POST",
-                            headers: {
-                                "Content-Type": "application/json",
-                                Authorization: `Bearer ${apiKey}`,
-                            },
-                            body: JSON.stringify({
-                                input: {
-                                    text: text.trim(),
-                                    language,
-                                    voice_id: voice || undefined,
-                                    reading_mode: DEFAULT_READING_MODE,
-                                },
-                            }),
+                    // Submit job via proxy
+                    const runResponse = await submitRunpodJob({
+                        input: {
+                            text: text.trim(),
+                            language,
+                            voice_id: voice || undefined,
+                            reading_mode: DEFAULT_READING_MODE,
                         },
-                    );
+                    });
 
-                    const runPayload = await runResponse.json().catch(() => ({}));
-                    if (!runResponse.ok) {
-                        if (runResponse.status === 401 || runResponse.status === 403) {
-                            localStorage.removeItem(STORAGE_KEYS.runpodApiKey);
-                        }
-                        throw new Error(
-                            runPayload.error
-                            || runPayload.message
-                            || `RunPod submit failed (${runResponse.status})`,
-                        );
-                    }
-
-                    const jobId = runPayload.id;
+                    const jobId = runResponse.id;
                     if (!jobId) {
                         throw new Error("RunPod did not return a job id.");
                     }
@@ -319,22 +269,17 @@ export const useTtsStudio = () => {
                     while (Date.now() <= deadline) {
                         await sleep(RUNPOD_POLL_INTERVAL_MS);
 
-                        const statusResponse = await fetch(
-                            `${RUNPOD_BASE_URL}/${RUNPOD_ENDPOINT_ID}/status/${encodeURIComponent(jobId)}`,
-                            {
-                                headers: { Authorization: `Bearer ${apiKey}` },
-                            },
-                        );
+                        statusPayload = await checkRunpodStatus(jobId);
+                        if (!statusPayload) {
+                            throw new Error("RunPod status check returned empty response.");
+                        }
 
-                        statusPayload = await statusResponse.json().catch(() => ({}));
-                        if (!statusResponse.ok) {
-                            if (statusResponse.status === 401 || statusResponse.status === 403) {
-                                localStorage.removeItem(STORAGE_KEYS.runpodApiKey);
-                            }
+                        const statusJobId = typeof statusPayload.id === "string"
+                            ? statusPayload.id.trim()
+                            : "";
+                        if (statusJobId && statusJobId !== jobId) {
                             throw new Error(
-                                statusPayload.error
-                                || statusPayload.message
-                                || `RunPod status failed (${statusResponse.status})`,
+                                `RunPod status mismatch: expected ${jobId}, got ${statusJobId}.`,
                             );
                         }
 
@@ -582,7 +527,7 @@ export const useTtsStudio = () => {
             setIsGenerating(false);
             setStatus({ text: `Error: ${error.message}`, tone: "error" });
         }
-    }, [isRunpodMode, language, resolveRunpodApiKey, text, voice, syncPlayerUi]);
+    }, [isRunpodMode, language, text, voice, syncPlayerUi]);
 
     const downloadAudio = useCallback(async () => {
         if (!text.trim()) {

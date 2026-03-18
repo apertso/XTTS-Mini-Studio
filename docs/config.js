@@ -1,8 +1,6 @@
 window.__XTTS_CONFIG__ = {
     apiMode: "runpod",
-    runpodBaseUrl: "https://api.runpod.ai/v2",
-    runpodEndpointId: "q3hbkez7bvinur",
-    runpodApiKey: "",
+    runpodProxyUrl: "https://twilight-dream-8480.djlokiart.workers.dev/api/runpod",
     apiBaseUrl: "http://localhost:5000",
     apiStreamingEnabled: false,
     runpodPollIntervalMs: 2000,

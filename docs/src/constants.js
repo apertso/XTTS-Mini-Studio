@@ -21,9 +21,7 @@ const getBooleanSetting = (value, fallback) => {
 
 export const API_MODE = getStringSetting(runtimeConfig.apiMode, "runpod").toLowerCase();
 export const API_BASE_URL = getStringSetting(runtimeConfig.apiBaseUrl, "http://localhost:5000");
-export const RUNPOD_BASE_URL = getStringSetting(runtimeConfig.runpodBaseUrl, "https://api.runpod.ai/v2");
-export const RUNPOD_ENDPOINT_ID = getStringSetting(runtimeConfig.runpodEndpointId, "q3hbkez7bvinur");
-export const RUNPOD_API_KEY = getStringSetting(runtimeConfig.runpodApiKey, "");
+export const RUNPOD_PROXY_URL = getStringSetting(runtimeConfig.runpodProxyUrl, "https://twilight-dream-8480.djlokiart.workers.dev/api/runpod");
 export const RUNPOD_POLL_INTERVAL_MS = getNumericSetting(runtimeConfig.runpodPollIntervalMs, 2000, 500);
 export const RUNPOD_TIMEOUT_MS = getNumericSetting(runtimeConfig.runpodTimeoutMs, 180000, 10000);
 export const API_STREAMING_ENABLED = getBooleanSetting(
@@ -52,5 +50,4 @@ export const STORAGE_KEYS = {
     text: "tts_text",
     voice: "tts_voice",
     language: "tts_language",
-    runpodApiKey: "runpod_api_key",
 };
