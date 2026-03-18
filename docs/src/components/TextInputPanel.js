@@ -1,6 +1,6 @@
 import { html } from "../lib/html.js";
 
-export const TextInputPanel = ({ text, onTextChange, onSubmit }) => html`
+export const TextInputPanel = ({ text, charCount, onTextChange, onSubmit }) => html`
     <section className="input-panel">
         <textarea
             id="tts-text"
@@ -14,5 +14,8 @@ export const TextInputPanel = ({ text, onTextChange, onSubmit }) => html`
                 }
             }}
         ></textarea>
+        <div className="text-meta">
+            <span className="text-char-count">${Number(charCount) || 0} symbols</span>
+        </div>
     </section>
 `;

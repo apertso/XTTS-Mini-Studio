@@ -16,6 +16,7 @@ export const StudioPage = () => {
 
                 ${TextInputPanel({
                     text: studio.text,
+                    charCount: studio.textCharCount,
                     onTextChange: studio.onTextChange,
                     onSubmit: studio.onSpeak,
                 })}

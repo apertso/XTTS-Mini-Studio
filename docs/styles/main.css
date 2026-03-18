@@ -173,6 +173,19 @@ body {
         0 0 0 4px rgba(247, 154, 115, 0.25);
 }
 
+.text-meta {
+    margin-top: 0.55rem;
+    display: flex;
+    justify-content: flex-end;
+}
+
+.text-char-count {
+    color: #8492a6;
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+}
+
 .controls-grid {
     display: grid;
     gap: 1rem;

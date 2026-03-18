@@ -23,7 +23,7 @@ export const API_MODE = getStringSetting(runtimeConfig.apiMode, "runpod").toLowe
 export const API_BASE_URL = getStringSetting(runtimeConfig.apiBaseUrl, "http://localhost:5000");
 export const RUNPOD_PROXY_URL = getStringSetting(runtimeConfig.runpodProxyUrl, "https://twilight-dream-8480.djlokiart.workers.dev/api/runpod");
 export const RUNPOD_POLL_INTERVAL_MS = getNumericSetting(runtimeConfig.runpodPollIntervalMs, 2000, 500);
-export const RUNPOD_TIMEOUT_MS = getNumericSetting(runtimeConfig.runpodTimeoutMs, 180000, 10000);
+export const RUNPOD_TIMEOUT_MS = getNumericSetting(runtimeConfig.runpodTimeoutMs, 900000, 10000);
 export const API_STREAMING_ENABLED = getBooleanSetting(
     runtimeConfig.apiStreamingEnabled,
     API_MODE !== "runpod",

@@ -264,7 +264,10 @@ export const useTtsStudio = () => {
                     setStatus({ text: "RunPod job is queued...", tone: "idle" });
                     setStreamProgress(22);
 
-                    const deadline = Date.now() + RUNPOD_TIMEOUT_MS;
+                    const submittedAt = Date.now();
+                    const warmupThresholdMs = 90 * 1000;
+                    const timeoutSeconds = Math.ceil(RUNPOD_TIMEOUT_MS / 1000);
+                    const deadline = submittedAt + RUNPOD_TIMEOUT_MS;
                     let statusPayload = null;
                     while (Date.now() <= deadline) {
                         await sleep(RUNPOD_POLL_INTERVAL_MS);
@@ -285,14 +288,26 @@ export const useTtsStudio = () => {
 
                         const runStatus = String(statusPayload.status || "").toUpperCase();
                         if (runStatus === "IN_QUEUE") {
-                            setStatus({ text: "RunPod queue: waiting for worker...", tone: "idle" });
+                            setStatus({
+                                text: "RunPod queue: starting worker and warming up model...",
+                                tone: "idle",
+                            });
                             setStreamProgress(30);
                             continue;
                         }
 
                         if (runStatus === "IN_PROGRESS") {
-                            setStatus({ text: "RunPod is generating audio...", tone: "idle" });
-                            setStreamProgress(72);
+                            const elapsedMs = Date.now() - submittedAt;
+                            if (elapsedMs < warmupThresholdMs) {
+                                setStatus({
+                                    text: "RunPod worker is loading and warming up the model...",
+                                    tone: "idle",
+                                });
+                                setStreamProgress(54);
+                            } else {
+                                setStatus({ text: "RunPod is generating audio...", tone: "idle" });
+                                setStreamProgress(72);
+                            }
                             continue;
                         }
 
@@ -321,7 +336,7 @@ export const useTtsStudio = () => {
 
                     if (!wavBlob) {
                         throw new Error(
-                            `RunPod polling timed out after ${Math.ceil(RUNPOD_TIMEOUT_MS / 1000)} seconds.`,
+                            `RunPod polling timed out after ${timeoutSeconds} seconds.`,
                         );
                     }
                 } else {
@@ -646,6 +661,7 @@ export const useTtsStudio = () => {
             ? `Generating ${Math.min(loadedChunkCount, totalChunkCount)}/${totalChunkCount}`
             : "Generating...")
         : "Generate Voice";
+    const textCharCount = text.length;
 
     const canDownload = !isGenerating && !isDownloading && !!text.trim();
     const statusClass = status.tone === "success"
@@ -656,6 +672,7 @@ export const useTtsStudio = () => {
 
     return {
         text,
+        textCharCount,
         voice,
         language,
         voices,

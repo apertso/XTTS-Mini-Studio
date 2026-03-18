@@ -4,5 +4,5 @@ window.__XTTS_CONFIG__ = {
     apiBaseUrl: "http://localhost:5000",
     apiStreamingEnabled: false,
     runpodPollIntervalMs: 2000,
-    runpodTimeoutMs: 180000,
+    runpodTimeoutMs: 900000,
 };
