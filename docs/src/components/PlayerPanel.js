@@ -19,6 +19,8 @@ export const PlayerPanel = ({
 }) => {
     const safeLoaded = clampPercent(loadedPercent);
     const safePlayed = clampPercent(playedPercent);
+    const loadedScale = safeLoaded / 100;
+    const playedScale = safePlayed / 100;
     const timeParts = String(timeDisplay).split(" / ");
     const currentTime = timeParts[0] || "0:00";
     const totalTime = timeParts[1] || "0:00";
@@ -40,14 +42,15 @@ export const PlayerPanel = ({
                     <div className="track-shell">
                         <div className="track">
                             <div className="track-rail"></div>
-                            <div className="track-loaded" style=${{ width: `${safeLoaded}%` }}></div>
-                            <div className="track-played" style=${{ width: `${safePlayed}%` }}></div>
+                            <div className="track-loaded" style=${{ "--track-scale": loadedScale }}></div>
+                            <div className="track-played" style=${{ "--track-scale": playedScale }}></div>
                             <input
                                 className="range-input"
                                 type="range"
                                 min="0"
                                 max="100"
                                 value=${safePlayed}
+                                onInput=${onSeek}
                                 onChange=${onSeek}
                                 disabled=${safeLoaded === 0}
                             />

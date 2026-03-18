@@ -500,24 +500,28 @@ body {
 
 .track-loaded {
     position: absolute;
-    inset: auto auto auto 0;
+    inset: auto 0 auto 0;
     top: 50%;
-    transform: translateY(-50%);
     height: 0.45rem;
     border-radius: 999px;
     background: #cbd5e1;
-    transition: width 0.04s linear;
+    transform: translateY(-50%) scaleX(var(--track-scale, 0));
+    transform-origin: left center;
+    transition: transform 0.04s linear;
+    will-change: transform;
 }
 
 .track-played {
     position: absolute;
-    inset: auto auto auto 0;
+    inset: auto 0 auto 0;
     top: 50%;
-    transform: translateY(-50%);
     height: 0.45rem;
     border-radius: 999px;
     background: #ffa485;
-    transition: width 0.04s linear;
+    transform: translateY(-50%) scaleX(var(--track-scale, 0));
+    transform-origin: left center;
+    transition: transform 0.04s linear;
+    will-change: transform;
 }
 
 .range-input {
