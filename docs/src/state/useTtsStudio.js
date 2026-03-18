@@ -105,19 +105,13 @@ export const useTtsStudio = () => {
         && referenceVoices.length === 0;
 
     const syncPlayerUi = useCallback((controller) => {
-        const totalChunks = totalChunksRef.current;
-        const loadedChunks = loadedChunksRef.current;
-        const safeTotalChunks = Math.max(totalChunks, loadedChunks, 1);
-
-        const loaded = (totalChunks > 0 || loadedChunks > 0)
-            ? (loadedChunks / safeTotalChunks) * 100
-            : (controller.loadedDuration > 0 ? 100 : 0);
+        const loaded = controller.loadedDuration > 0 ? 100 : 0;
         const played = controller.loadedDuration > 0
             ? (controller.currentTime / controller.loadedDuration) * 100
             : 0;
 
         const loadedClamped = clampPercent(loaded);
-        const playedClamped = clampPercent(Math.min(played, loadedClamped > 0 ? loadedClamped : 100));
+        const playedClamped = clampPercent(played);
 
         setLoadedPercent(loadedClamped);
         setPlayedPercent(playedClamped);
@@ -642,9 +636,9 @@ export const useTtsStudio = () => {
         const controller = audioControllerRef.current;
         if (!controller) return;
         const inputValue = Number(event.target.value);
-        const clampedValue = Math.min(inputValue, loadedPercent || 100);
+        const clampedValue = clampPercent(inputValue);
         controller.seek(clampedValue / 100);
-    }, [loadedPercent]);
+    }, []);
 
     const playerStateClass = playerMode === "playing"
         ? "player-state-live"

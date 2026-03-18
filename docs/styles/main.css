@@ -506,7 +506,7 @@ body {
     height: 0.45rem;
     border-radius: 999px;
     background: #cbd5e1;
-    transition: width 0.16s ease;
+    transition: width 0.04s linear;
 }
 
 .track-played {
@@ -517,7 +517,7 @@ body {
     height: 0.45rem;
     border-radius: 999px;
     background: #ffa485;
-    transition: width 0.16s ease;
+    transition: width 0.04s linear;
 }
 
 .range-input {
