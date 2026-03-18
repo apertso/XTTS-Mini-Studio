@@ -1,5 +1,6 @@
 const RUNPOD_ROUTE = '/api/runpod';
 const RUNPOD_STATUS_PREFIX = '/api/runpod/status/';
+const RUNPOD_AUDIO_ROUTE = '/api/runpod/audio';
 
 const parseAllowedOrigins = (value) =>
   String(value || '')
@@ -52,6 +53,19 @@ const extractStatusJobId = (pathname) => {
   }
 };
 
+const parseHttpUrl = (value) => {
+  const candidate = String(value || '').trim();
+  if (!candidate) return null;
+  try {
+    const parsed = new URL(candidate);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+      ? parsed.toString()
+      : null;
+  } catch {
+    return null;
+  }
+};
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -89,6 +103,50 @@ export default {
       } catch (error) {
         return jsonResponse(
           { error: 'Status request failed', details: String(error) },
+          500,
+          corsHeaders
+        );
+      }
+    }
+
+    if (request.method === 'GET' && url.pathname === RUNPOD_AUDIO_ROUTE) {
+      const audioUrl = parseHttpUrl(url.searchParams.get('url'));
+      if (!audioUrl) {
+        return jsonResponse({ error: 'Invalid audio URL' }, 400, corsHeaders);
+      }
+
+      try {
+        const upstreamResponse = await fetch(audioUrl, { method: 'GET' });
+        if (!upstreamResponse.ok) {
+          const details = await upstreamResponse.text().catch(() => '');
+          return jsonResponse(
+            {
+              error: 'Audio fetch failed',
+              status: upstreamResponse.status,
+              details: details ? details.slice(0, 500) : undefined,
+            },
+            502,
+            corsHeaders
+          );
+        }
+
+        const responseHeaders = {
+          ...corsHeaders,
+          'Content-Type': upstreamResponse.headers.get('Content-Type') || 'application/octet-stream',
+          'Cache-Control': 'no-store',
+        };
+        const contentLength = upstreamResponse.headers.get('Content-Length');
+        if (contentLength) {
+          responseHeaders['Content-Length'] = contentLength;
+        }
+
+        return new Response(upstreamResponse.body, {
+          status: 200,
+          headers: responseHeaders,
+        });
+      } catch (error) {
+        return jsonResponse(
+          { error: 'Audio proxy fetch failed', details: String(error) },
           500,
           corsHeaders
         );

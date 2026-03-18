@@ -47,3 +47,26 @@ export const checkRunpodStatus = async (jobId) => {
 
     return response.json();
 };
+
+export const fetchRunpodAudioBytes = async (audioUrl) => {
+    const normalizedAudioUrl = String(audioUrl || "").trim();
+    if (!normalizedAudioUrl) {
+        throw new Error("RunPod audio URL is empty.");
+    }
+
+    const response = await fetch(
+        `${normalizedProxyUrl}/audio?url=${encodeURIComponent(normalizedAudioUrl)}`,
+        { method: "GET" },
+    );
+
+    if (!response.ok) {
+        throw new Error(await readProxyError(response, "Audio download failed"));
+    }
+
+    const buffer = await response.arrayBuffer();
+    if (!buffer.byteLength) {
+        throw new Error("Audio proxy returned empty payload.");
+    }
+
+    return new Uint8Array(buffer);
+};

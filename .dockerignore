@@ -1,0 +1,23 @@
+# VCS and metadata
+.git
+.gitignore
+
+# Python cache/venv
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Local artifacts and docs not required for runpod worker image
+tasks/
+logs/
+docs/
+worker/
+project_code.txt
+
+# Heavy model artifacts must not be sent in docker build context
+models/
+
+# Raw voice source files are not needed at runtime
+assets/voice_references/raw/

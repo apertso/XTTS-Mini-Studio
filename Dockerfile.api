@@ -5,7 +5,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     TTS_MODE=local \
     TTS_HOST=0.0.0.0 \
     TTS_PORT=5000 \
-    XTTS_MODEL_DIR=/models/xtts_v2
+    MODEL_ID=coqui/XTTS-v2 \
+    MODEL_DIR=/var/cache/huggingface/hub \
+    HF_HOME=/var/cache/huggingface \
+    HUGGINGFACE_HUB_CACHE=/var/cache/huggingface/hub
 
 WORKDIR /app
 
@@ -25,9 +28,6 @@ COPY tts /app/tts
 
 # Copy voice references
 COPY assets/voice_references /app/assets/voice_references
-
-# Copy XTTS model files
-COPY models/xtts_v2 /models/xtts_v2
 
 # Expose API port
 EXPOSE 5000

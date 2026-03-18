@@ -15,6 +15,7 @@ configure_stdio()
 
 DEFAULT_MAX_INLINE_AUDIO_BYTES = 6_500_000
 DEFAULT_UPLOAD_PREFIX = "xtts-audio"
+DEFAULT_UPLOAD_BUCKET_NAME = ""
 
 
 def _read_int_env(name: str, default: int) -> int:
@@ -36,6 +37,10 @@ MAX_INLINE_AUDIO_BYTES = _read_int_env(
 UPLOAD_PREFIX = (
     os.environ.get("RUNPOD_AUDIO_UPLOAD_PREFIX", DEFAULT_UPLOAD_PREFIX).strip()
     or DEFAULT_UPLOAD_PREFIX
+)
+UPLOAD_BUCKET_NAME = (
+    os.environ.get("RUNPOD_AUDIO_BUCKET_NAME", DEFAULT_UPLOAD_BUCKET_NAME).strip()
+    or None
 )
 
 
@@ -62,13 +67,15 @@ def _upload_audio(job: Dict[str, Any], wav_bytes: bytes) -> str:
     audio_url = rp_upload.upload_in_memory_object(
         file_name=file_name,
         file_data=wav_bytes,
+        bucket_name=UPLOAD_BUCKET_NAME,
         prefix=UPLOAD_PREFIX,
     )
 
     if not isinstance(audio_url, str) or not _is_http_url(audio_url):
         raise RuntimeError(
             "Upload fallback returned a local path. Configure BUCKET_ENDPOINT_URL, "
-            "BUCKET_ACCESS_KEY_ID, and BUCKET_SECRET_ACCESS_KEY for reachable audio URLs."
+            "BUCKET_ACCESS_KEY_ID, BUCKET_SECRET_ACCESS_KEY, and RUNPOD_AUDIO_BUCKET_NAME "
+            "for reachable audio URLs."
         )
 
     return audio_url
@@ -111,7 +118,8 @@ def runpod_handler(job: Dict[str, Any]) -> Dict[str, Any]:
                 "Generated audio is too large for inline RunPod results "
                 f"({audio_size} bytes > {MAX_INLINE_AUDIO_BYTES}). "
                 "Configure BUCKET_ENDPOINT_URL, BUCKET_ACCESS_KEY_ID, "
-                "BUCKET_SECRET_ACCESS_KEY, and boto3 for audio_url fallback. "
+                "BUCKET_SECRET_ACCESS_KEY, RUNPOD_AUDIO_BUCKET_NAME, and boto3 "
+                "for audio_url fallback. "
                 f"Upload failed: {exc}"
             ),
             "audio_bytes": audio_size,

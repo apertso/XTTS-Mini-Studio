@@ -6,22 +6,42 @@ import re
 from pathlib import Path
 from typing import Any, Iterator, List, Optional, Tuple
 
+from huggingface_hub import snapshot_download
+from huggingface_hub.utils import (
+    EntryNotFoundError,
+    GatedRepoError,
+    HfHubHTTPError,
+    LocalEntryNotFoundError,
+    RepositoryNotFoundError,
+    RevisionNotFoundError,
+)
 import numpy as np
 import torch
 from scipy.io import wavfile
 
 from .config import (
+    CHUNK_SAFETY_MARGIN,
     DEFAULT_CHUNK_LENGTH,
+    HF_HOME,
+    HF_HOME_ENV_VAR,
+    HUGGINGFACE_HUB_CACHE,
+    HUGGINGFACE_HUB_CACHE_ENV_VAR,
+    LEGACY_MODEL_DIR_ENV_VAR,
     MAX_RMS_GAIN,
     MODE,
+    MIN_CHUNK_LENGTH,
     MIN_RMS_GAIN,
+    MODEL_DIR_SOURCE,
     MODEL_DIR,
     MODEL_DIR_ENV_VAR,
+    MODEL_ID,
+    MODEL_ID_ENV_VAR,
     PRECISION_FP16,
     READING_MODE_DEFAULT,
     READING_PROFILES,
     REQUESTED_PRECISION,
     STREAM_CROSSFADE_MS,
+    TOKENIZER_CHAR_LIMITS,
     resolve_effective_precision,
     validate_mode,
 )
@@ -39,6 +59,11 @@ REQUIRED_MODEL_FILES = {
     "vocab": "vocab.json",
     "speakers": "speakers_xtts.pth",
 }
+HF_ALLOW_PATTERNS = tuple(REQUIRED_MODEL_FILES.values())
+
+
+class ModelResolutionError(RuntimeError):
+    """Raised when XTTS model resolution through local path/cache/download fails."""
 
 
 def format_log_preview(text: str, limit: int = 50) -> str:
@@ -46,6 +71,19 @@ def format_log_preview(text: str, limit: int = 50) -> str:
     if len(text) > limit:
         preview += "..."
     return preview.encode("ascii", errors="backslashreplace").decode("ascii")
+
+
+def _format_path(path: Path | None) -> str:
+    return str(path) if path is not None else "<unset>"
+
+
+def _missing_model_files(model_dir: Path) -> list[str]:
+    resolved = model_dir.resolve()
+    missing = []
+    for file_name in REQUIRED_MODEL_FILES.values():
+        if not (resolved / file_name).exists():
+            missing.append(file_name)
+    return missing
 
 
 def resolve_model_paths(model_dir: Path) -> dict[str, Path]:
@@ -59,14 +97,123 @@ def resolve_model_paths(model_dir: Path) -> dict[str, Path]:
         raise FileNotFoundError(
             "XTTS model directory is missing required files: "
             f"{missing_list}. Checked: {resolved}. "
-            f"Set {MODEL_DIR_ENV_VAR} to a valid XTTS model directory."
+            f"Set {MODEL_DIR_ENV_VAR} (or legacy {LEGACY_MODEL_DIR_ENV_VAR}) "
+            "to a valid XTTS model directory."
         )
     return paths
 
 
+def _classify_hf_error(exc: Exception) -> str:
+    if isinstance(exc, GatedRepoError):
+        return "auth issue"
+    if isinstance(exc, HfHubHTTPError):
+        status = exc.response.status_code if exc.response is not None else None
+        if status in {401, 403}:
+            return "auth issue"
+        if status == 404:
+            return "model not found"
+    if isinstance(exc, (RepositoryNotFoundError, RevisionNotFoundError, EntryNotFoundError)):
+        return "model not found"
+    return "download failed"
+
+
+def _resolve_hf_snapshot(cache_dir: Path | None, local_files_only: bool) -> Path:
+    snapshot_path = snapshot_download(
+        repo_id=MODEL_ID,
+        cache_dir=str(cache_dir) if cache_dir is not None else None,
+        local_files_only=local_files_only,
+        allow_patterns=list(HF_ALLOW_PATTERNS),
+    )
+    return Path(snapshot_path).resolve()
+
+
+def resolve_runtime_model_dir() -> Path:
+    print(
+        "Model environment: "
+        f"{MODEL_ID_ENV_VAR}={MODEL_ID}, "
+        f"{MODEL_DIR_ENV_VAR}={_format_path(MODEL_DIR)}, "
+        f"{HF_HOME_ENV_VAR}={_format_path(HF_HOME)}, "
+        f"{HUGGINGFACE_HUB_CACHE_ENV_VAR}={_format_path(HUGGINGFACE_HUB_CACHE)}"
+    )
+    if MODEL_DIR_SOURCE == LEGACY_MODEL_DIR_ENV_VAR:
+        print(
+            f"Model directory resolved from legacy env var {LEGACY_MODEL_DIR_ENV_VAR}; "
+            f"prefer {MODEL_DIR_ENV_VAR}."
+        )
+
+    local_path_issue: str | None = None
+    if MODEL_DIR is not None:
+        if not MODEL_DIR.exists():
+            local_path_issue = f"wrong path: local model directory does not exist ({MODEL_DIR})"
+            print(f"Model directory check: {local_path_issue}")
+        elif not MODEL_DIR.is_dir():
+            local_path_issue = f"wrong path: local model path is not a directory ({MODEL_DIR})"
+            print(f"Model directory check: {local_path_issue}")
+        else:
+            missing = _missing_model_files(MODEL_DIR)
+            if not missing:
+                print(f"Model source: local directory ({MODEL_DIR})")
+                return MODEL_DIR.resolve()
+            local_path_issue = (
+                f"missing files: {', '.join(sorted(missing))} in {MODEL_DIR}"
+            )
+            print(
+                "Model directory check: "
+                f"{local_path_issue}. Falling back to Hugging Face cache/model download."
+            )
+
+    cache_dir = MODEL_DIR if MODEL_DIR is not None else HUGGINGFACE_HUB_CACHE
+    print(
+        f"Checking Hugging Face local cache for '{MODEL_ID}' "
+        f"(cache_dir={_format_path(cache_dir)})"
+    )
+    try:
+        snapshot_path = _resolve_hf_snapshot(cache_dir=cache_dir, local_files_only=True)
+        print(f"Model source: Hugging Face cache (local hit) at {snapshot_path}")
+    except LocalEntryNotFoundError:
+        print("Hugging Face cache status: miss")
+        snapshot_path = None
+    except Exception as exc:
+        print(
+            "Hugging Face cache lookup failed; continuing with online download. "
+            f"Reason: {format_log_preview(str(exc), limit=220)}"
+        )
+        snapshot_path = None
+
+    if snapshot_path is None:
+        print("Attempting XTTS model download from Hugging Face...")
+        try:
+            snapshot_path = _resolve_hf_snapshot(cache_dir=cache_dir, local_files_only=False)
+            print(f"Hugging Face download status: success ({snapshot_path})")
+        except Exception as exc:
+            reason = _classify_hf_error(exc)
+            local_issue_note = (
+                f" local_issue={local_path_issue};" if local_path_issue is not None else ""
+            )
+            raise ModelResolutionError(
+                "XTTS model resolution failed: "
+                f"{reason};{local_issue_note} "
+                f"model_id={MODEL_ID}; cache_dir={_format_path(cache_dir)}; "
+                f"error={format_log_preview(str(exc), limit=280)}"
+            ) from exc
+
+    missing = _missing_model_files(snapshot_path)
+    if missing:
+        missing_list = ", ".join(sorted(missing))
+        raise ModelResolutionError(
+            "XTTS model resolution failed: missing files; "
+            f"required={missing_list}; resolved_path={snapshot_path}; "
+            "check MODEL_DIR/MODEL_ID or Hugging Face cache integrity."
+        )
+
+    print(f"Final XTTS model path: {snapshot_path}")
+    return snapshot_path
+
+
 def _load_runtime() -> Tuple[Any, Any]:
     global _PRECISION_STATE
-    model_paths = resolve_model_paths(MODEL_DIR)
+    resolved_model_dir = resolve_runtime_model_dir()
+    model_paths = resolve_model_paths(resolved_model_dir)
 
     from TTS.tts.configs.xtts_config import XttsConfig
     from TTS.tts.models.xtts import Xtts
@@ -211,9 +358,21 @@ def resolve_reading_profile(reading_mode: Optional[str]) -> dict:
 
 
 def resolve_chunk_length(language: str, chunk_limit_adjust: int = 0) -> int:
-    _ = language
-    _ = chunk_limit_adjust
-    return DEFAULT_CHUNK_LENGTH
+    normalized_language = normalize_language_code(language)
+    tokenizer_limit = TOKENIZER_CHAR_LIMITS.get(normalized_language)
+
+    base_limit = DEFAULT_CHUNK_LENGTH
+    if tokenizer_limit is not None:
+        base_limit = min(base_limit, tokenizer_limit - CHUNK_SAFETY_MARGIN)
+
+    adjusted_limit = base_limit + int(chunk_limit_adjust)
+    adjusted_limit = max(1, adjusted_limit)
+    adjusted_limit = max(MIN_CHUNK_LENGTH, adjusted_limit)
+
+    if tokenizer_limit is not None:
+        adjusted_limit = min(adjusted_limit, max(1, tokenizer_limit - 1))
+
+    return adjusted_limit
 
 
 def split_long_sentence(sentence: str, max_length: int) -> List[str]:

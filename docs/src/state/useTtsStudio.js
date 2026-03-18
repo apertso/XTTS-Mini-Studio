@@ -12,7 +12,7 @@ import {
     STORAGE_KEYS,
 } from "../constants.js";
 import { createAudioController } from "../audio/audioController.js";
-import { submitRunpodJob, checkRunpodStatus } from "../api/runpodProxy.js";
+import { submitRunpodJob, checkRunpodStatus, fetchRunpodAudioBytes } from "../api/runpodProxy.js";
 import {
     clampPercent,
     concatUint8,
@@ -48,18 +48,7 @@ const fetchAudioFromUrl = async (audioUrl) => {
     if (!normalizedUrl) {
         throw new Error("RunPod returned an empty audio URL.");
     }
-
-    const response = await fetch(normalizedUrl);
-    if (!response.ok) {
-        throw new Error(`Failed to download RunPod audio (${response.status}).`);
-    }
-
-    const buffer = await response.arrayBuffer();
-    if (!buffer.byteLength) {
-        throw new Error("RunPod audio URL returned an empty payload.");
-    }
-
-    return new Uint8Array(buffer);
+    return fetchRunpodAudioBytes(normalizedUrl);
 };
 
 export const useTtsStudio = () => {

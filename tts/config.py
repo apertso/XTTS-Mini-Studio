@@ -68,17 +68,58 @@ READING_PROFILES = {
 MAX_RMS_GAIN = 1.20
 MIN_RMS_GAIN = 0.83
 
-MODEL_DIR_ENV_VAR = "XTTS_MODEL_DIR"
-DEFAULT_MODEL_DIR = BASE_DIR / "models" / "xtts_v2"
+MODEL_ID_ENV_VAR = "MODEL_ID"
+MODEL_DIR_ENV_VAR = "MODEL_DIR"
+LEGACY_MODEL_DIR_ENV_VAR = "XTTS_MODEL_DIR"
+HF_HOME_ENV_VAR = "HF_HOME"
+HUGGINGFACE_HUB_CACHE_ENV_VAR = "HUGGINGFACE_HUB_CACHE"
+
+DEFAULT_MODEL_ID = "coqui/XTTS-v2"
+DEFAULT_LOCAL_MODEL_DIR = BASE_DIR / "models" / "xtts_v2"
 
 
-def resolve_model_dir() -> Path:
-    model_dir_env = (os.getenv(MODEL_DIR_ENV_VAR) or "").strip()
-    model_dir = Path(model_dir_env).expanduser() if model_dir_env else DEFAULT_MODEL_DIR
-    return model_dir.resolve()
+def _optional_env(var_name: str) -> str | None:
+    value = os.getenv(var_name)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
 
 
-MODEL_DIR = resolve_model_dir()
+def _resolve_path(value: str) -> Path:
+    return Path(value).expanduser().resolve()
+
+
+def resolve_model_id() -> str:
+    return _optional_env(MODEL_ID_ENV_VAR) or DEFAULT_MODEL_ID
+
+
+def resolve_model_dir() -> tuple[Path | None, str]:
+    model_dir_env = _optional_env(MODEL_DIR_ENV_VAR)
+    if model_dir_env:
+        return _resolve_path(model_dir_env), MODEL_DIR_ENV_VAR
+
+    legacy_model_dir_env = _optional_env(LEGACY_MODEL_DIR_ENV_VAR)
+    if legacy_model_dir_env:
+        return _resolve_path(legacy_model_dir_env), LEGACY_MODEL_DIR_ENV_VAR
+
+    if DEFAULT_LOCAL_MODEL_DIR.exists():
+        return DEFAULT_LOCAL_MODEL_DIR.resolve(), "default_local_model_dir"
+
+    return None, "unset"
+
+
+def resolve_optional_path(var_name: str) -> Path | None:
+    value = _optional_env(var_name)
+    if value is None:
+        return None
+    return _resolve_path(value)
+
+
+MODEL_ID = resolve_model_id()
+MODEL_DIR, MODEL_DIR_SOURCE = resolve_model_dir()
+HF_HOME = resolve_optional_path(HF_HOME_ENV_VAR)
+HUGGINGFACE_HUB_CACHE = resolve_optional_path(HUGGINGFACE_HUB_CACHE_ENV_VAR)
 
 MODE = (os.getenv("TTS_MODE", "local") or "local").strip().lower()
 ALLOWED_MODES = {"local", "runpod"}
