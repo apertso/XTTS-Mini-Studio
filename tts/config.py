@@ -33,7 +33,7 @@ TOKENIZER_CHAR_LIMITS = {
 
 CHUNK_SAFETY_MARGIN = 16
 MIN_CHUNK_LENGTH = 80
-DEFAULT_CHUNK_LENGTH = 340
+DEFAULT_CHUNK_LENGTH = 330
 STORY_CHUNK_LIMIT_ADJUST = -12
 STREAM_CROSSFADE_MS = 32
 
@@ -83,6 +83,13 @@ MODEL_DIR = resolve_model_dir()
 MODE = (os.getenv("TTS_MODE", "local") or "local").strip().lower()
 ALLOWED_MODES = {"local", "runpod"}
 
+PRECISION_ENV_VAR = "XTTS_PRECISION"
+PRECISION_AUTO = "auto"
+PRECISION_FP32 = "fp32"
+PRECISION_FP16 = "fp16"
+DEFAULT_PRECISION = PRECISION_AUTO
+ALLOWED_PRECISIONS = {PRECISION_AUTO, PRECISION_FP32, PRECISION_FP16}
+
 TTS_HOST = os.getenv("TTS_HOST", "0.0.0.0")
 TTS_PORT = int(os.getenv("TTS_PORT", "5000"))
 
@@ -93,6 +100,46 @@ def validate_mode(mode: str) -> str:
         expected = ", ".join(sorted(ALLOWED_MODES))
         raise ValueError(f"Invalid TTS_MODE: {mode!r}. Expected one of: {expected}")
     return normalized
+
+
+def validate_precision(precision: str) -> str:
+    normalized = (precision or "").strip().lower()
+    if normalized not in ALLOWED_PRECISIONS:
+        expected = ", ".join(sorted(ALLOWED_PRECISIONS))
+        raise ValueError(f"Invalid {PRECISION_ENV_VAR}: {precision!r}. Expected one of: {expected}")
+    return normalized
+
+
+def resolve_requested_precision() -> str:
+    raw = (os.getenv(PRECISION_ENV_VAR, DEFAULT_PRECISION) or DEFAULT_PRECISION).strip().lower()
+    return validate_precision(raw)
+
+
+REQUESTED_PRECISION = resolve_requested_precision()
+
+
+def resolve_effective_precision(
+    mode: str, requested_precision: str, cuda_available: bool
+) -> tuple[str, str | None]:
+    normalized_mode = validate_mode(mode)
+    normalized_precision = validate_precision(requested_precision)
+
+    if not cuda_available:
+        if normalized_precision == PRECISION_FP16:
+            return (
+                PRECISION_FP32,
+                f"{PRECISION_ENV_VAR}=fp16 requested but CUDA is unavailable; falling back to fp32.",
+            )
+        return PRECISION_FP32, None
+
+    if normalized_precision == PRECISION_FP32:
+        return PRECISION_FP32, None
+    if normalized_precision == PRECISION_FP16:
+        return PRECISION_FP16, None
+
+    if normalized_mode == "runpod":
+        return PRECISION_FP16, None
+    return PRECISION_FP32, None
 
 
 def configure_stdio() -> None:

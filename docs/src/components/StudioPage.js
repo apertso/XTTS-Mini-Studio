@@ -41,6 +41,7 @@ export const StudioPage = () => {
                         label: studio.generationLabel,
                         progress: studio.streamProgress,
                         bufferCount: studio.bufferCount,
+                        showBuffer: studio.isStreamingEnabled,
                         onClick: studio.onSpeak,
                     })}
                     <p className=${`status-line ${studio.statusClass}`}>${studio.status.text}</p>

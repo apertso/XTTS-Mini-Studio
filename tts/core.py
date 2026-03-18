@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import io
 import re
 from pathlib import Path
@@ -12,12 +13,17 @@ from scipy.io import wavfile
 from .config import (
     DEFAULT_CHUNK_LENGTH,
     MAX_RMS_GAIN,
+    MODE,
     MIN_RMS_GAIN,
     MODEL_DIR,
     MODEL_DIR_ENV_VAR,
+    PRECISION_FP16,
     READING_MODE_DEFAULT,
     READING_PROFILES,
+    REQUESTED_PRECISION,
     STREAM_CROSSFADE_MS,
+    resolve_effective_precision,
+    validate_mode,
 )
 from .voices import resolve_voice
 
@@ -25,6 +31,7 @@ from .voices import resolve_voice
 SENTENCE_END_PATTERN = re.compile("[.!?\u2026][\"')\\]]*$")
 
 _RUNTIME: Optional[Tuple[Any, Any]] = None
+_PRECISION_STATE: Optional[dict[str, Any]] = None
 
 REQUIRED_MODEL_FILES = {
     "config": "config.json",
@@ -58,6 +65,7 @@ def resolve_model_paths(model_dir: Path) -> dict[str, Path]:
 
 
 def _load_runtime() -> Tuple[Any, Any]:
+    global _PRECISION_STATE
     model_paths = resolve_model_paths(MODEL_DIR)
 
     from TTS.tts.configs.xtts_config import XttsConfig
@@ -78,12 +86,38 @@ def _load_runtime() -> Tuple[Any, Any]:
         eval=True,
     )
 
-    if torch.cuda.is_available():
+    mode = validate_mode(MODE)
+    cuda_available = torch.cuda.is_available()
+    effective_precision, precision_note = resolve_effective_precision(
+        mode=mode,
+        requested_precision=REQUESTED_PRECISION,
+        cuda_available=cuda_available,
+    )
+    autocast_enabled = bool(cuda_available and effective_precision == PRECISION_FP16)
+    _PRECISION_STATE = {
+        "mode": mode,
+        "cuda_available": cuda_available,
+        "requested_precision": REQUESTED_PRECISION,
+        "effective_precision": effective_precision,
+        "autocast_enabled": autocast_enabled,
+        "runtime_fallback_triggered": False,
+    }
+
+    if cuda_available:
         print(f"Using CUDA GPU: {torch.cuda.get_device_name(0)}")
         model = model.cuda()
-        print("Using float32 precision (required for TTS inference)")
     else:
         print("CUDA not available, using CPU")
+
+    print(
+        "Precision policy: "
+        f"requested={REQUESTED_PRECISION}, "
+        f"effective={effective_precision}, "
+        f"mode={mode}, "
+        f"autocast={'on' if autocast_enabled else 'off'}"
+    )
+    if precision_note:
+        print(f"Precision policy note: {precision_note}")
 
     model.eval()
     print("Model loaded!")
@@ -95,6 +129,56 @@ def get_runtime() -> Tuple[Any, Any]:
     if _RUNTIME is None:
         _RUNTIME = _load_runtime()
     return _RUNTIME
+
+
+def get_precision_state() -> dict[str, Any]:
+    global _PRECISION_STATE
+    if _PRECISION_STATE is None:
+        get_runtime()
+    assert _PRECISION_STATE is not None
+    return _PRECISION_STATE
+
+
+def _autocast_context():
+    precision_state = get_precision_state()
+    if precision_state["autocast_enabled"] and precision_state["cuda_available"]:
+        return torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True)
+    return nullcontext()
+
+
+def _synthesize_chunk_once(
+    model: Any,
+    xtts_config: Any,
+    chunk: str,
+    language: str,
+    voice_selection: dict,
+    synthesis_kwargs: dict,
+):
+    with _autocast_context():
+        return model.synthesize(
+            text=chunk,
+            config=xtts_config,
+            speaker_wav=voice_selection["speaker_wav"],
+            speaker_id=voice_selection["speaker_id"],
+            language=language,
+            **synthesis_kwargs,
+        )
+
+
+def _disable_autocast_after_runtime_error(exc: RuntimeError) -> bool:
+    precision_state = get_precision_state()
+    if not precision_state["autocast_enabled"]:
+        return False
+
+    precision_state["autocast_enabled"] = False
+    precision_state["effective_precision"] = "fp32"
+    precision_state["runtime_fallback_triggered"] = True
+    print(
+        "FP16 autocast failed with RuntimeError; retrying current chunk in fp32 "
+        "and disabling autocast for this process."
+    )
+    print(f"Autocast failure reason: {format_log_preview(str(exc), limit=200)}")
+    return True
 
 
 def get_sample_rate() -> int:
@@ -281,14 +365,26 @@ def synthesize_chunk(
     chunk: str, language: str, voice_selection: dict, synthesis_kwargs: dict
 ) -> np.ndarray:
     model, xtts_config = get_runtime()
-    outputs = model.synthesize(
-        text=chunk,
-        config=xtts_config,
-        speaker_wav=voice_selection["speaker_wav"],
-        speaker_id=voice_selection["speaker_id"],
-        language=language,
-        **synthesis_kwargs,
-    )
+    try:
+        outputs = _synthesize_chunk_once(
+            model=model,
+            xtts_config=xtts_config,
+            chunk=chunk,
+            language=language,
+            voice_selection=voice_selection,
+            synthesis_kwargs=synthesis_kwargs,
+        )
+    except RuntimeError as exc:
+        if not _disable_autocast_after_runtime_error(exc):
+            raise
+        outputs = _synthesize_chunk_once(
+            model=model,
+            xtts_config=xtts_config,
+            chunk=chunk,
+            language=language,
+            voice_selection=voice_selection,
+            synthesis_kwargs=synthesis_kwargs,
+        )
     return extract_audio_array(outputs)
 
 

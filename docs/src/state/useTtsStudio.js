@@ -1,10 +1,17 @@
 import { React } from "../lib/html.js";
 import {
+    API_MODE,
     API_BASE_URL,
     API_STREAMING_ENABLED,
     AUTOPLAY_CHUNK_THRESHOLD,
     DEFAULT_LANGUAGE,
     DEFAULT_READING_MODE,
+    RUNPOD_API_KEY,
+    RUNPOD_BASE_URL,
+    RUNPOD_ENDPOINT_ID,
+    RUNPOD_FALLBACK_VOICES,
+    RUNPOD_POLL_INTERVAL_MS,
+    RUNPOD_TIMEOUT_MS,
     STORAGE_KEYS,
 } from "../constants.js";
 import { createAudioController } from "../audio/audioController.js";
@@ -20,6 +27,23 @@ import {
 const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
 const INITIAL_STATUS = { text: "Ready to synthesize.", tone: "idle" };
+const RUNPOD_MODE = "runpod";
+const RUNPOD_TERMINAL_STATUSES = new Set(["COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"]);
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const decodeBase64ToBytes = (base64Audio) => {
+    const cleanBase64 = String(base64Audio || "").replace(/\s+/g, "");
+    if (!cleanBase64) {
+        throw new Error("RunPod returned empty audio data.");
+    }
+    const binary = atob(cleanBase64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+};
 
 export const useTtsStudio = () => {
     const [text, setText] = useState("");
@@ -51,6 +75,7 @@ export const useTtsStudio = () => {
     const loadedChunksRef = useRef(0);
     const autoStartUsedRef = useRef(false);
     const autoStartLockedByUserRef = useRef(false);
+    const isRunpodMode = API_MODE === RUNPOD_MODE;
 
     const selectedVoice = useMemo(
         () => voices.find((item) => item.id === voice) || null,
@@ -67,7 +92,8 @@ export const useTtsStudio = () => {
         [voices],
     );
 
-    const backendNeedsRestart = voicesReady
+    const backendNeedsRestart = !isRunpodMode
+        && voicesReady
         && !voiceLoadFailed
         && voices.length > 0
         && referenceVoices.length === 0;
@@ -116,6 +142,29 @@ export const useTtsStudio = () => {
         let cancelled = false;
         (async () => {
             try {
+                if (isRunpodMode) {
+                    const availableVoices = [...RUNPOD_FALLBACK_VOICES];
+                    setVoices(availableVoices);
+                    setVoicesReady(true);
+                    setVoiceLoadFailed(false);
+
+                    const fallbackVoice = availableVoices[0]?.id || "";
+                    const hasSavedVoice = availableVoices.some((item) => item.id === savedVoice);
+                    setVoice(hasSavedVoice ? savedVoice : fallbackVoice);
+
+                    const hasApiKey = Boolean(
+                        RUNPOD_API_KEY
+                        || (localStorage.getItem(STORAGE_KEYS.runpodApiKey) || "").trim(),
+                    );
+                    setStatus({
+                        text: hasApiKey
+                            ? "Ready to synthesize via RunPod."
+                            : "RunPod mode ready. API key will be requested on first generate.",
+                        tone: "idle",
+                    });
+                    return;
+                }
+
                 const response = await fetch(`${API_BASE_URL}/api/voices`);
                 const data = await response.json();
                 if (cancelled) return;
@@ -150,7 +199,7 @@ export const useTtsStudio = () => {
             cancelled = true;
             audioControllerRef.current?.reset();
         };
-    }, [syncPlayerUi]);
+    }, [isRunpodMode, syncPlayerUi]);
 
     useEffect(() => {
         localStorage.setItem(STORAGE_KEYS.text, text);
@@ -163,6 +212,22 @@ export const useTtsStudio = () => {
     useEffect(() => {
         localStorage.setItem(STORAGE_KEYS.language, language);
     }, [language]);
+
+    const resolveRunpodApiKey = useCallback(() => {
+        const configuredApiKey = (RUNPOD_API_KEY || "").trim();
+        if (configuredApiKey) return configuredApiKey;
+
+        const storedApiKey = (localStorage.getItem(STORAGE_KEYS.runpodApiKey) || "").trim();
+        if (storedApiKey) return storedApiKey;
+
+        const promptedApiKey = (window.prompt("Enter RunPod API key (rpa_...)") || "").trim();
+        if (!promptedApiKey) {
+            return "";
+        }
+
+        localStorage.setItem(STORAGE_KEYS.runpodApiKey, promptedApiKey);
+        return promptedApiKey;
+    }, []);
 
     const speak = useCallback(async () => {
         if (!text.trim()) {
@@ -200,35 +265,157 @@ export const useTtsStudio = () => {
         // Non-streaming mode (RunPod compatibility)
         if (!API_STREAMING_ENABLED) {
             try {
-                const response = await fetch(`${API_BASE_URL}/tts/download`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        text: text.trim(),
-                        language,
-                        voice_id: voice || undefined,
-                        reading_mode: DEFAULT_READING_MODE,
-                    }),
-                });
+                let wavBlob = null;
+                if (isRunpodMode) {
+                    const apiKey = resolveRunpodApiKey();
+                    if (!apiKey) {
+                        throw new Error("RunPod API key is required.");
+                    }
 
-                if (!response.ok) {
-                    const errorPayload = await response.json().catch(() => ({ error: "Unknown generation error" }));
-                    throw new Error(errorPayload.error || "Generation failed");
+                    setStatus({ text: "Submitting RunPod job...", tone: "idle" });
+                    setStreamProgress(10);
+
+                    const runResponse = await fetch(
+                        `${RUNPOD_BASE_URL}/${RUNPOD_ENDPOINT_ID}/run`,
+                        {
+                            method: "POST",
+                            headers: {
+                                "Content-Type": "application/json",
+                                Authorization: `Bearer ${apiKey}`,
+                            },
+                            body: JSON.stringify({
+                                input: {
+                                    text: text.trim(),
+                                    language,
+                                    voice_id: voice || undefined,
+                                    reading_mode: DEFAULT_READING_MODE,
+                                },
+                            }),
+                        },
+                    );
+
+                    const runPayload = await runResponse.json().catch(() => ({}));
+                    if (!runResponse.ok) {
+                        if (runResponse.status === 401 || runResponse.status === 403) {
+                            localStorage.removeItem(STORAGE_KEYS.runpodApiKey);
+                        }
+                        throw new Error(
+                            runPayload.error
+                            || runPayload.message
+                            || `RunPod submit failed (${runResponse.status})`,
+                        );
+                    }
+
+                    const jobId = runPayload.id;
+                    if (!jobId) {
+                        throw new Error("RunPod did not return a job id.");
+                    }
+
+                    setStatus({ text: "RunPod job is queued...", tone: "idle" });
+                    setStreamProgress(22);
+
+                    const deadline = Date.now() + RUNPOD_TIMEOUT_MS;
+                    let statusPayload = null;
+                    while (Date.now() <= deadline) {
+                        await sleep(RUNPOD_POLL_INTERVAL_MS);
+
+                        const statusResponse = await fetch(
+                            `${RUNPOD_BASE_URL}/${RUNPOD_ENDPOINT_ID}/status/${encodeURIComponent(jobId)}`,
+                            {
+                                headers: { Authorization: `Bearer ${apiKey}` },
+                            },
+                        );
+
+                        statusPayload = await statusResponse.json().catch(() => ({}));
+                        if (!statusResponse.ok) {
+                            if (statusResponse.status === 401 || statusResponse.status === 403) {
+                                localStorage.removeItem(STORAGE_KEYS.runpodApiKey);
+                            }
+                            throw new Error(
+                                statusPayload.error
+                                || statusPayload.message
+                                || `RunPod status failed (${statusResponse.status})`,
+                            );
+                        }
+
+                        const runStatus = String(statusPayload.status || "").toUpperCase();
+                        if (runStatus === "IN_QUEUE") {
+                            setStatus({ text: "RunPod queue: waiting for worker...", tone: "idle" });
+                            setStreamProgress(30);
+                            continue;
+                        }
+
+                        if (runStatus === "IN_PROGRESS") {
+                            setStatus({ text: "RunPod is generating audio...", tone: "idle" });
+                            setStreamProgress(72);
+                            continue;
+                        }
+
+                        if (!RUNPOD_TERMINAL_STATUSES.has(runStatus)) {
+                            setStatus({ text: `RunPod status: ${runStatus || "WAITING"}...`, tone: "idle" });
+                            continue;
+                        }
+
+                        if (runStatus !== "COMPLETED") {
+                            throw new Error(
+                                statusPayload.error
+                                || statusPayload.message
+                                || `RunPod job ${runStatus.toLowerCase()}.`,
+                            );
+                        }
+
+                        const audioBase64 = statusPayload.output?.audio_base64 || statusPayload.audio_base64;
+                        if (typeof audioBase64 !== "string" || !audioBase64.trim()) {
+                            throw new Error("RunPod completed but returned no audio.");
+                        }
+
+                        const wavBytes = decodeBase64ToBytes(audioBase64);
+                        wavBlob = new Blob([wavBytes], { type: "audio/wav" });
+                        break;
+                    }
+
+                    if (!wavBlob) {
+                        throw new Error(
+                            `RunPod polling timed out after ${Math.ceil(RUNPOD_TIMEOUT_MS / 1000)} seconds.`,
+                        );
+                    }
+                } else {
+                    const response = await fetch(`${API_BASE_URL}/tts/download`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            text: text.trim(),
+                            language,
+                            voice_id: voice || undefined,
+                            reading_mode: DEFAULT_READING_MODE,
+                        }),
+                    });
+
+                    if (!response.ok) {
+                        const errorPayload = await response.json().catch(() => ({ error: "Unknown generation error" }));
+                        throw new Error(errorPayload.error || "Generation failed");
+                    }
+
+                    wavBlob = await response.blob();
                 }
 
-                const wavBlob = await response.blob();
                 generatedWavBlobRef.current = wavBlob;
 
                 // Extract audio data for player
                 const arrayBuffer = await wavBlob.arrayBuffer();
                 const wavData = new Uint8Array(arrayBuffer);
-                // Skip WAV header (44 bytes) and feed raw PCM to player
-                const pcmData = new Int16Array(wavData.buffer, 44);
-                controller.addChunk(pcmData);
-                controller.markGenerationDone();
-
-                sampleRateRef.current = 22050; // Default for XTTS v2
+                const inferredSampleRate = wavData.byteLength >= 28 ? readUint32LE(wavData, 24) : 22050;
+                sampleRateRef.current = inferredSampleRate || 22050;
                 controller.sampleRate = sampleRateRef.current;
+
+                if (wavData.byteLength > 44) {
+                    // Skip WAV header (44 bytes) and feed raw PCM to player
+                    const pcmData = new Int16Array(arrayBuffer, 44, Math.floor((wavData.byteLength - 44) / 2));
+                    if (pcmData.length > 0) {
+                        controller.addChunk(pcmData);
+                    }
+                }
+                controller.markGenerationDone();
 
                 setDownloadReady(true);
                 setPlayerVisible(true);
@@ -395,7 +582,7 @@ export const useTtsStudio = () => {
             setIsGenerating(false);
             setStatus({ text: `Error: ${error.message}`, tone: "error" });
         }
-    }, [language, text, voice, syncPlayerUi]);
+    }, [isRunpodMode, language, resolveRunpodApiKey, text, voice, syncPlayerUi]);
 
     const downloadAudio = useCallback(async () => {
         if (!text.trim()) {
@@ -410,6 +597,17 @@ export const useTtsStudio = () => {
                 triggerBlobDownload(generatedWavBlobRef.current, "speech.wav");
                 setStatus({ text: "WAV downloaded.", tone: "success" });
                 return;
+            }
+
+            if (isRunpodMode) {
+                setStatus({ text: "Generating audio on RunPod before download...", tone: "idle" });
+                await speak();
+                if (generatedWavBlobRef.current) {
+                    triggerBlobDownload(generatedWavBlobRef.current, "speech.wav");
+                    setStatus({ text: "WAV downloaded.", tone: "success" });
+                    return;
+                }
+                throw new Error("RunPod did not return downloadable audio.");
             }
 
             const response = await fetch(`${API_BASE_URL}/tts/download`, {
@@ -438,7 +636,7 @@ export const useTtsStudio = () => {
         } finally {
             setIsDownloading(false);
         }
-    }, [language, text, voice]);
+    }, [isRunpodMode, language, speak, text, voice]);
 
     const handleTogglePlayback = useCallback(() => {
         const controller = audioControllerRef.current;
@@ -482,13 +680,21 @@ export const useTtsStudio = () => {
                     ? "Preparing"
                     : "Idle";
 
-    const playerDescription = playerMode === "buffering"
-        ? "Buffer is refilling. Playback will continue automatically as new chunks arrive."
-        : playerVisible
-            ? "Play or scrub through generated audio while the stream is active."
+    const playerDescription = API_STREAMING_ENABLED
+        ? (playerMode === "buffering"
+            ? "Buffer is refilling. Playback will continue automatically as new chunks arrive."
+            : playerVisible
+                ? "Play or scrub through generated audio while the stream is active."
+                : isGenerating
+                    ? "Transport will unlock as soon as the first buffered chunks are ready."
+                    : "Generate speech to activate streaming playback controls.")
+        : (playerVisible
+            ? "Play or scrub through generated audio. Download is available."
             : isGenerating
-                ? "Transport will unlock as soon as the first buffered chunks are ready."
-                : "Generate speech to activate streaming playback controls.";
+                ? (isRunpodMode
+                    ? "RunPod is generating audio. Player unlocks after completion."
+                    : "Generating audio. Player unlocks when WAV is ready.")
+                : "Generate speech to activate playback controls.");
 
     const generationLabel = isGenerating
         ? (totalChunkCount > 0
@@ -516,6 +722,7 @@ export const useTtsStudio = () => {
         backendNeedsRestart,
         status,
         statusClass,
+        isStreamingEnabled: API_STREAMING_ENABLED,
         isGenerating,
         streamProgress,
         bufferCount,

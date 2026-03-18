@@ -8,6 +8,7 @@ export const GenerateButton = ({
     label,
     progress,
     bufferCount,
+    showBuffer,
     onClick,
 }) => {
     const safeProgress = clampPercent(progress);
@@ -25,7 +26,7 @@ export const GenerateButton = ({
                 : null}
             <span className="generate-content">
                 <span className="generate-label">${label}</span>
-                ${isGenerating ? html`
+                ${isGenerating && showBuffer ? html`
                     <span className="generate-buffer" aria-hidden="true">
                         ${Array.from({ length: AUTOPLAY_CHUNK_THRESHOLD }, (_, index) => html`
                             <span className=${`buffer-slot ${index < safeBuffer ? "buffer-slot-filled" : ""}`}></span>
