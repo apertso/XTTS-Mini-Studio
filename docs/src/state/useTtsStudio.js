@@ -1,22 +1,23 @@
 import { React } from "../lib/html.js";
 import {
-    API_MODE,
     API_BASE_URL,
-    API_STREAMING_ENABLED,
-    AUTOPLAY_CHUNK_THRESHOLD,
+    API_MODE,
     DEFAULT_LANGUAGE,
-    DEFAULT_READING_MODE,
+    MAX_TEXT_CHARACTERS,
     RUNPOD_FALLBACK_VOICES,
     RUNPOD_POLL_INTERVAL_MS,
-    RUNPOD_TIMEOUT_MS,
     STORAGE_KEYS,
 } from "../constants.js";
 import { createAudioController } from "../audio/audioController.js";
-import { submitRunpodJob, checkRunpodStatus, fetchRunpodAudioBytes } from "../api/runpodProxy.js";
+import {
+    TERMINAL_JOB_STATUSES,
+    cancelTtsJob,
+    checkTtsJobStatus,
+    fetchTtsJobAudioBytes,
+    submitTtsJob,
+} from "../api/ttsJobs.js";
 import {
     clampPercent,
-    concatUint8,
-    createWavBlobFromChunks,
     formatTime,
     readUint32LE,
     triggerBlobDownload,
@@ -26,29 +27,132 @@ const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
 const INITIAL_STATUS = { text: "Ready to synthesize.", tone: "idle" };
 const RUNPOD_MODE = "runpod";
-const RUNPOD_TERMINAL_STATUSES = new Set(["COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"]);
+const PENDING_JOB_VERSION = 1;
+const TEXT_LIMIT_ERROR_PREFIX = "Text exceeds maximum length:";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const decodeBase64ToBytes = (base64Audio) => {
-    const cleanBase64 = String(base64Audio || "").replace(/\s+/g, "");
-    if (!cleanBase64) {
-        throw new Error("RunPod returned empty audio data.");
-    }
-    const binary = atob(cleanBase64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i += 1) {
-        bytes[i] = binary.charCodeAt(i);
-    }
-    return bytes;
+const normalizeTextValue = (value) => String(value || "").trim();
+
+const getNormalizedTextCharCount = (value) => normalizeTextValue(value).length;
+
+const getTextLimitErrorText = (charCount) =>
+    `${TEXT_LIMIT_ERROR_PREFIX} ${MAX_TEXT_CHARACTERS} symbols (got ${charCount}).`;
+
+const toFiniteInteger = (value) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return null;
+    return Math.floor(numeric);
 };
 
-const fetchAudioFromUrl = async (audioUrl) => {
-    const normalizedUrl = String(audioUrl || "").trim();
-    if (!normalizedUrl) {
-        throw new Error("RunPod returned an empty audio URL.");
+const parseChunkProgressObject = (candidate) => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+        return null;
     }
-    return fetchRunpodAudioBytes(normalizedUrl);
+
+    const processedChunks = toFiniteInteger(
+        candidate.processed_chunks
+        ?? candidate.processedChunks
+        ?? candidate.chunks_processed
+        ?? candidate.chunksProcessed
+        ?? candidate.processed
+        ?? candidate.current,
+    );
+    const totalChunks = toFiniteInteger(
+        candidate.total_chunks
+        ?? candidate.totalChunks
+        ?? candidate.chunks_total
+        ?? candidate.chunksTotal
+        ?? candidate.total,
+    );
+
+    if (processedChunks === null && totalChunks === null) {
+        return null;
+    }
+
+    return {
+        processedChunks: processedChunks === null ? null : Math.max(0, processedChunks),
+        totalChunks: totalChunks === null ? null : Math.max(0, totalChunks),
+    };
+};
+
+const extractJobChunkProgress = (statusPayload) => {
+    if (!statusPayload || typeof statusPayload !== "object" || Array.isArray(statusPayload)) {
+        return null;
+    }
+
+    const outputPayload = statusPayload.output && typeof statusPayload.output === "object" && !Array.isArray(statusPayload.output)
+        ? statusPayload.output
+        : null;
+    const candidates = [
+        outputPayload?.chunk_progress,
+        outputPayload?.chunkProgress,
+        outputPayload?.progress,
+        outputPayload,
+        statusPayload.chunk_progress,
+        statusPayload.chunkProgress,
+        statusPayload.progress,
+        statusPayload,
+    ];
+
+    for (const candidate of candidates) {
+        const parsed = parseChunkProgressObject(candidate);
+        if (parsed) {
+            return parsed;
+        }
+    }
+
+    return null;
+};
+
+const normalizeJobStatus = (status) => String(status || "").trim().toUpperCase();
+
+const readPendingJobSnapshot = () => {
+    try {
+        const raw = localStorage.getItem(STORAGE_KEYS.pendingJob);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+        if (parsed.v !== PENDING_JOB_VERSION) return null;
+        if (String(parsed.mode || "").trim().toLowerCase() !== API_MODE) return null;
+        const jobId = String(parsed.jobId || "").trim();
+        if (!jobId) return null;
+
+        const request = parsed.request && typeof parsed.request === "object" && !Array.isArray(parsed.request)
+            ? parsed.request
+            : {};
+
+        return {
+            jobId,
+            submittedAt: Number(parsed.submittedAt) || Date.now(),
+            request: {
+                text: String(request.text || ""),
+                language: String(request.language || DEFAULT_LANGUAGE),
+                voice_id: request.voice_id ? String(request.voice_id) : "",
+            },
+        };
+    } catch (_error) {
+        return null;
+    }
+};
+
+const writePendingJobSnapshot = (jobId, requestPayload) => {
+    const payload = {
+        v: PENDING_JOB_VERSION,
+        mode: API_MODE,
+        jobId: String(jobId || "").trim(),
+        submittedAt: Date.now(),
+        request: {
+            text: String(requestPayload?.text || ""),
+            language: String(requestPayload?.language || DEFAULT_LANGUAGE),
+            voice_id: requestPayload?.voice_id ? String(requestPayload.voice_id) : "",
+        },
+    };
+    localStorage.setItem(STORAGE_KEYS.pendingJob, JSON.stringify(payload));
+};
+
+const clearPendingJobSnapshot = () => {
+    localStorage.removeItem(STORAGE_KEYS.pendingJob);
 };
 
 export const useTtsStudio = () => {
@@ -60,8 +164,8 @@ export const useTtsStudio = () => {
     const [voiceLoadFailed, setVoiceLoadFailed] = useState(false);
     const [status, setStatus] = useState(INITIAL_STATUS);
     const [isGenerating, setIsGenerating] = useState(false);
+    const [isCancelling, setIsCancelling] = useState(false);
     const [streamProgress, setStreamProgress] = useState(0);
-    const [bufferCount, setBufferCount] = useState(0);
     const [loadedChunkCount, setLoadedChunkCount] = useState(0);
     const [totalChunkCount, setTotalChunkCount] = useState(0);
     const [playerVisible, setPlayerVisible] = useState(false);
@@ -72,16 +176,20 @@ export const useTtsStudio = () => {
     const [playedPercent, setPlayedPercent] = useState(0);
     const [loadedPercent, setLoadedPercent] = useState(0);
     const [timeDisplay, setTimeDisplay] = useState("0:00 / 0:00");
+    const [activeJobId, setActiveJobId] = useState("");
 
     const audioControllerRef = useRef(null);
-    const allAudioChunksRef = useRef([]);
     const generatedWavBlobRef = useRef(null);
     const sampleRateRef = useRef(22050);
-    const totalChunksRef = useRef(0);
     const loadedChunksRef = useRef(0);
-    const autoStartUsedRef = useRef(false);
-    const autoStartLockedByUserRef = useRef(false);
+    const totalChunksRef = useRef(0);
+    const pollingTokenRef = useRef(0);
+    const activeJobIdRef = useRef("");
     const isRunpodMode = API_MODE === RUNPOD_MODE;
+
+    useEffect(() => {
+        activeJobIdRef.current = activeJobId;
+    }, [activeJobId]);
 
     const selectedVoice = useMemo(
         () => voices.find((item) => item.id === voice) || null,
@@ -110,11 +218,8 @@ export const useTtsStudio = () => {
             ? (controller.currentTime / controller.loadedDuration) * 100
             : 0;
 
-        const loadedClamped = clampPercent(loaded);
-        const playedClamped = clampPercent(played);
-
-        setLoadedPercent(loadedClamped);
-        setPlayedPercent(playedClamped);
+        setLoadedPercent(clampPercent(loaded));
+        setPlayedPercent(clampPercent(played));
         setTimeDisplay(`${formatTime(controller.currentTime)} / ${formatTime(controller.loadedDuration)}`);
         setIsPlaying(controller.isPlaying);
         setPlayerMode(
@@ -123,6 +228,223 @@ export const useTtsStudio = () => {
                 : (controller.loadedDuration > 0 ? "ready" : "idle"),
         );
     }, []);
+
+    const resetGenerationTracking = useCallback(() => {
+        loadedChunksRef.current = 0;
+        totalChunksRef.current = 0;
+        setLoadedChunkCount(0);
+        setTotalChunkCount(0);
+        setStreamProgress(0);
+    }, []);
+
+    const applyChunkProgress = useCallback((loadedRaw, totalRaw) => {
+        const nextLoaded = Number.isFinite(Number(loadedRaw))
+            ? Math.max(0, Math.floor(Number(loadedRaw)))
+            : loadedChunksRef.current;
+        const nextTotal = Number.isFinite(Number(totalRaw))
+            ? Math.max(0, Math.floor(Number(totalRaw)))
+            : totalChunksRef.current;
+
+        const safeLoaded = Math.max(loadedChunksRef.current, nextLoaded);
+        const safeTotal = nextTotal > 0
+            ? Math.max(totalChunksRef.current, nextTotal, safeLoaded)
+            : totalChunksRef.current;
+
+        loadedChunksRef.current = safeLoaded;
+        totalChunksRef.current = safeTotal;
+
+        const displayLoaded = safeTotal > 0 ? Math.min(safeLoaded, safeTotal) : safeLoaded;
+        setLoadedChunkCount(displayLoaded);
+        setTotalChunkCount(safeTotal);
+
+        if (safeTotal > 0) {
+            const progress = clampPercent((displayLoaded / safeTotal) * 100);
+            setStreamProgress(progress);
+        }
+    }, []);
+
+    const clearActivePendingJob = useCallback(() => {
+        clearPendingJobSnapshot();
+        setActiveJobId("");
+        activeJobIdRef.current = "";
+    }, []);
+
+    const finishGeneration = useCallback((nextStatusText, nextStatusTone) => {
+        setIsGenerating(false);
+        setIsCancelling(false);
+        setStatus({ text: nextStatusText, tone: nextStatusTone });
+        clearActivePendingJob();
+    }, [clearActivePendingJob]);
+
+    const applyWavBytesToPlayer = useCallback(async (wavBytes) => {
+        const controller = audioControllerRef.current;
+        if (!controller) {
+            throw new Error("Player is not initialized yet.");
+        }
+
+        controller.reset();
+
+        const wavBlob = new Blob([wavBytes], { type: "audio/wav" });
+        generatedWavBlobRef.current = wavBlob;
+
+        const arrayBuffer = await wavBlob.arrayBuffer();
+        const wavData = new Uint8Array(arrayBuffer);
+        const inferredSampleRate = wavData.byteLength >= 28 ? readUint32LE(wavData, 24) : 22050;
+        sampleRateRef.current = inferredSampleRate || 22050;
+        controller.sampleRate = sampleRateRef.current;
+
+        if (wavData.byteLength > 44) {
+            const pcmData = new Int16Array(arrayBuffer, 44, Math.floor((wavData.byteLength - 44) / 2));
+            if (pcmData.length > 0) {
+                controller.addChunk(pcmData);
+            }
+        }
+        controller.markGenerationDone();
+
+        setPlayerVisible(true);
+        setDownloadReady(true);
+        setStreamProgress(100);
+        syncPlayerUi(controller);
+    }, [syncPlayerUi]);
+
+    const pollJobUntilTerminal = useCallback(async (jobId) => {
+        const normalizedJobId = String(jobId || "").trim();
+        if (!normalizedJobId) {
+            finishGeneration("Error: Missing active job id.", "error");
+            return;
+        }
+
+        const token = ++pollingTokenRef.current;
+        let consecutiveStatusErrors = 0;
+
+        while (pollingTokenRef.current === token) {
+            let statusPayload = null;
+            try {
+                statusPayload = await checkTtsJobStatus(normalizedJobId);
+                consecutiveStatusErrors = 0;
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                const lowered = message.toLowerCase();
+
+                if (lowered.includes("not found")) {
+                    finishGeneration("Pending job was not found. Lock was cleared.", "error");
+                    resetGenerationTracking();
+                    return;
+                }
+
+                consecutiveStatusErrors += 1;
+                setStatus({
+                    text: `Status check failed (${consecutiveStatusErrors}). Retrying...`,
+                    tone: "error",
+                });
+                await sleep(RUNPOD_POLL_INTERVAL_MS);
+                continue;
+            }
+
+            const statusJobId = typeof statusPayload?.id === "string"
+                ? statusPayload.id.trim()
+                : "";
+            if (statusJobId && statusJobId !== normalizedJobId) {
+                finishGeneration(
+                    `Error: Job status mismatch: expected ${normalizedJobId}, got ${statusJobId}.`,
+                    "error",
+                );
+                return;
+            }
+
+            const progress = extractJobChunkProgress(statusPayload);
+            if (progress) {
+                applyChunkProgress(progress.processedChunks, progress.totalChunks);
+            }
+
+            const jobStatus = normalizeJobStatus(statusPayload?.status);
+            if (jobStatus === "IN_QUEUE") {
+                setStatus({
+                    text: isRunpodMode
+                        ? "RunPod queue: waiting for worker..."
+                        : "Local queue: waiting for worker...",
+                    tone: "idle",
+                });
+                if (totalChunksRef.current === 0) {
+                    setStreamProgress(24);
+                }
+                await sleep(RUNPOD_POLL_INTERVAL_MS);
+                continue;
+            }
+
+            if (jobStatus === "IN_PROGRESS") {
+                setStatus({
+                    text: isRunpodMode ? "RunPod is generating audio..." : "Local worker is generating audio...",
+                    tone: "idle",
+                });
+                if (totalChunksRef.current === 0) {
+                    setStreamProgress(68);
+                }
+                await sleep(RUNPOD_POLL_INTERVAL_MS);
+                continue;
+            }
+
+            if (!TERMINAL_JOB_STATUSES.has(jobStatus)) {
+                setStatus({ text: `Job status: ${jobStatus || "WAITING"}...`, tone: "idle" });
+                await sleep(RUNPOD_POLL_INTERVAL_MS);
+                continue;
+            }
+
+            if (jobStatus !== "COMPLETED") {
+                const errorText = statusPayload?.error
+                    || statusPayload?.message
+                    || `TTS job ${jobStatus.toLowerCase()}.`;
+                const tone = jobStatus === "CANCELLED" ? "idle" : "error";
+                const textValue = jobStatus === "CANCELLED"
+                    ? "Generation cancelled."
+                    : `Error: ${errorText}`;
+                finishGeneration(textValue, tone);
+                if (jobStatus === "CANCELLED") {
+                    resetGenerationTracking();
+                }
+                return;
+            }
+
+            try {
+                const wavBytes = await fetchTtsJobAudioBytes(normalizedJobId, statusPayload);
+                if (pollingTokenRef.current !== token) {
+                    return;
+                }
+                await applyWavBytesToPlayer(wavBytes);
+                finishGeneration("Ready. You can listen or download WAV.", "success");
+                return;
+            } catch (error) {
+                finishGeneration(`Error: ${error instanceof Error ? error.message : String(error)}`, "error");
+                return;
+            }
+        }
+    }, [
+        applyChunkProgress,
+        applyWavBytesToPlayer,
+        finishGeneration,
+        isRunpodMode,
+        resetGenerationTracking,
+    ]);
+
+    const restorePendingJob = useCallback((pendingSnapshot) => {
+        if (!pendingSnapshot) {
+            return;
+        }
+
+        const pendingJobId = String(pendingSnapshot.jobId || "").trim();
+        if (!pendingJobId) {
+            clearPendingJobSnapshot();
+            return;
+        }
+
+        setActiveJobId(pendingJobId);
+        activeJobIdRef.current = pendingJobId;
+        setIsGenerating(true);
+        setIsCancelling(false);
+        setStatus({ text: "Recovered pending job. Resuming status polling...", tone: "idle" });
+        setStreamProgress(16);
+        void pollJobUntilTerminal(pendingJobId);
+    }, [pollJobUntilTerminal]);
 
     useEffect(() => {
         audioControllerRef.current = createAudioController({
@@ -135,9 +457,13 @@ export const useTtsStudio = () => {
         const savedText = localStorage.getItem(STORAGE_KEYS.text) || "";
         const savedVoice = localStorage.getItem(STORAGE_KEYS.voice) || "";
         const savedLanguage = localStorage.getItem(STORAGE_KEYS.language) || DEFAULT_LANGUAGE;
+        const pendingSnapshot = readPendingJobSnapshot();
+        if (!pendingSnapshot) {
+            clearPendingJobSnapshot();
+        }
 
-        setText(savedText);
-        setLanguage(savedLanguage);
+        setText(pendingSnapshot?.request?.text || savedText);
+        setLanguage(pendingSnapshot?.request?.language || savedLanguage);
 
         let cancelled = false;
         (async () => {
@@ -148,52 +474,68 @@ export const useTtsStudio = () => {
                     setVoicesReady(true);
                     setVoiceLoadFailed(false);
 
+                    const requestedVoice = pendingSnapshot?.request?.voice_id || savedVoice;
                     const fallbackVoice = availableVoices[0]?.id || "";
-                    const hasSavedVoice = availableVoices.some((item) => item.id === savedVoice);
-                    setVoice(hasSavedVoice ? savedVoice : fallbackVoice);
+                    const hasRequestedVoice = availableVoices.some((item) => item.id === requestedVoice);
+                    setVoice(hasRequestedVoice ? requestedVoice : fallbackVoice);
 
-                    setStatus({
-                        text: "Ready to synthesize via RunPod.",
-                        tone: "idle",
-                    });
-                    return;
+                    if (!pendingSnapshot) {
+                        setStatus({
+                            text: "Ready to synthesize via RunPod.",
+                            tone: "idle",
+                        });
+                    }
+                } else {
+                    const response = await fetch(`${API_BASE_URL}/api/voices`);
+                    const data = await response.json();
+                    if (cancelled) return;
+
+                    const availableVoices = Array.isArray(data.voices) ? data.voices : [];
+                    setVoices(availableVoices);
+                    setVoicesReady(true);
+                    setVoiceLoadFailed(false);
+
+                    const requestedVoice = pendingSnapshot?.request?.voice_id || savedVoice;
+                    const fallbackVoice = availableVoices[0]?.id || "";
+                    const hasRequestedVoice = availableVoices.some((item) => item.id === requestedVoice);
+                    setVoice(hasRequestedVoice ? requestedVoice : fallbackVoice);
+
+                    if (!pendingSnapshot) {
+                        if (availableVoices.length === 0) {
+                            setStatus({ text: "No voices available.", tone: "error" });
+                        } else if (!availableVoices.some((item) => item.source_type === "reference")) {
+                            setStatus({
+                                text: "Server is missing reference voices. Restart backend if needed.",
+                                tone: "error",
+                            });
+                        }
+                    }
                 }
 
-                const response = await fetch(`${API_BASE_URL}/api/voices`);
-                const data = await response.json();
-                if (cancelled) return;
-
-                const availableVoices = Array.isArray(data.voices) ? data.voices : [];
-                setVoices(availableVoices);
-                setVoicesReady(true);
-                setVoiceLoadFailed(false);
-
-                if (availableVoices.length === 0) {
-                    setStatus({ text: "No voices available.", tone: "error" });
-                } else if (!availableVoices.some((item) => item.source_type === "reference")) {
-                    setStatus({
-                        text: "Server is missing reference voices. Restart backend if needed.",
-                        tone: "error",
-                    });
+                if (!cancelled && pendingSnapshot) {
+                    restorePendingJob(pendingSnapshot);
                 }
-
-                const fallbackVoice = availableVoices[0]?.id || "";
-                const hasSavedVoice = availableVoices.some((item) => item.id === savedVoice);
-                setVoice(hasSavedVoice ? savedVoice : fallbackVoice);
             } catch (error) {
                 if (cancelled) return;
                 console.error("Failed to load voices:", error);
                 setVoicesReady(true);
                 setVoiceLoadFailed(true);
                 setStatus({ text: "Failed to load voices.", tone: "error" });
+                if (pendingSnapshot) {
+                    clearActivePendingJob();
+                    resetGenerationTracking();
+                    setIsGenerating(false);
+                    setIsCancelling(false);
+                }
             }
         })();
 
         return () => {
             cancelled = true;
+            pollingTokenRef.current += 1;
             audioControllerRef.current?.reset();
         };
-    }, [isRunpodMode, syncPlayerUi]);
+    }, [clearActivePendingJob, isRunpodMode, resetGenerationTracking, restorePendingJob, syncPlayerUi]);
 
     useEffect(() => {
         localStorage.setItem(STORAGE_KEYS.text, text);
@@ -207,9 +549,35 @@ export const useTtsStudio = () => {
         localStorage.setItem(STORAGE_KEYS.language, language);
     }, [language]);
 
-    const speak = useCallback(async () => {
-        if (!text.trim()) {
+    const handleTextChange = useCallback((nextText) => {
+        const safeText = String(nextText || "");
+        setText(safeText);
+
+        const nextCharCount = getNormalizedTextCharCount(safeText);
+        if (nextCharCount <= MAX_TEXT_CHARACTERS) {
+            setStatus((currentStatus) => {
+                if (
+                    currentStatus.tone === "error"
+                    && String(currentStatus.text || "").startsWith(TEXT_LIMIT_ERROR_PREFIX)
+                ) {
+                    return INITIAL_STATUS;
+                }
+                return currentStatus;
+            });
+        }
+    }, []);
+
+    const startGeneration = useCallback(async () => {
+        if (isGenerating) return;
+
+        const normalizedText = normalizeTextValue(text);
+        if (!normalizedText) {
             setStatus({ text: "Enter text before generating audio.", tone: "error" });
+            return;
+        }
+        const textCharCount = normalizedText.length;
+        if (textCharCount > MAX_TEXT_CHARACTERS) {
+            setStatus({ text: getTextLimitErrorText(textCharCount), tone: "error" });
             return;
         }
 
@@ -220,414 +588,110 @@ export const useTtsStudio = () => {
         }
 
         controller.reset();
-
         generatedWavBlobRef.current = null;
-        allAudioChunksRef.current = [];
         sampleRateRef.current = 22050;
-        totalChunksRef.current = 0;
-        loadedChunksRef.current = 0;
-        autoStartUsedRef.current = false;
-        autoStartLockedByUserRef.current = false;
-
-        setIsGenerating(true);
-        setStreamProgress(2);
-        setBufferCount(0);
-        setLoadedChunkCount(0);
-        setTotalChunkCount(0);
         setPlayerVisible(false);
         setDownloadReady(false);
         setTimeDisplay("0:00 / 0:00");
-        setStatus({ text: "Preparing...", tone: "idle" });
+        resetGenerationTracking();
         syncPlayerUi(controller);
 
-        // Non-streaming mode (RunPod compatibility)
-        if (!API_STREAMING_ENABLED) {
-            try {
-                let wavBlob = null;
-                if (isRunpodMode) {
-                    setStatus({ text: "Submitting RunPod job...", tone: "idle" });
-                    setStreamProgress(10);
+        const requestPayload = {
+            text: normalizedText,
+            language,
+            voice_id: voice || undefined,
+        };
 
-                    // Submit job via proxy
-                    const runResponse = await submitRunpodJob({
-                        input: {
-                            text: text.trim(),
-                            language,
-                            voice_id: voice || undefined,
-                            reading_mode: DEFAULT_READING_MODE,
-                        },
-                    });
+        setIsGenerating(true);
+        setIsCancelling(false);
+        setStatus({ text: isRunpodMode ? "Submitting RunPod job..." : "Submitting local job...", tone: "idle" });
+        setStreamProgress(10);
 
-                    const jobId = runResponse.id;
-                    if (!jobId) {
-                        throw new Error("RunPod did not return a job id.");
-                    }
-
-                    setStatus({ text: "RunPod job is queued...", tone: "idle" });
-                    setStreamProgress(22);
-
-                    const submittedAt = Date.now();
-                    const warmupThresholdMs = 90 * 1000;
-                    const timeoutSeconds = Math.ceil(RUNPOD_TIMEOUT_MS / 1000);
-                    const deadline = submittedAt + RUNPOD_TIMEOUT_MS;
-                    let statusPayload = null;
-                    while (Date.now() <= deadline) {
-                        await sleep(RUNPOD_POLL_INTERVAL_MS);
-
-                        statusPayload = await checkRunpodStatus(jobId);
-                        if (!statusPayload) {
-                            throw new Error("RunPod status check returned empty response.");
-                        }
-
-                        const statusJobId = typeof statusPayload.id === "string"
-                            ? statusPayload.id.trim()
-                            : "";
-                        if (statusJobId && statusJobId !== jobId) {
-                            throw new Error(
-                                `RunPod status mismatch: expected ${jobId}, got ${statusJobId}.`,
-                            );
-                        }
-
-                        const runStatus = String(statusPayload.status || "").toUpperCase();
-                        if (runStatus === "IN_QUEUE") {
-                            setStatus({
-                                text: "RunPod queue: starting worker and warming up model...",
-                                tone: "idle",
-                            });
-                            setStreamProgress(30);
-                            continue;
-                        }
-
-                        if (runStatus === "IN_PROGRESS") {
-                            const elapsedMs = Date.now() - submittedAt;
-                            if (elapsedMs < warmupThresholdMs) {
-                                setStatus({
-                                    text: "RunPod worker is loading and warming up the model...",
-                                    tone: "idle",
-                                });
-                                setStreamProgress(54);
-                            } else {
-                                setStatus({ text: "RunPod is generating audio...", tone: "idle" });
-                                setStreamProgress(72);
-                            }
-                            continue;
-                        }
-
-                        if (!RUNPOD_TERMINAL_STATUSES.has(runStatus)) {
-                            setStatus({ text: `RunPod status: ${runStatus || "WAITING"}...`, tone: "idle" });
-                            continue;
-                        }
-
-                        if (runStatus !== "COMPLETED") {
-                            throw new Error(
-                                statusPayload.error
-                                || statusPayload.message
-                                || `RunPod job ${runStatus.toLowerCase()}.`,
-                            );
-                        }
-
-                        const outputPayload = statusPayload.output && typeof statusPayload.output === "object"
-                            ? statusPayload.output
-                            : {};
-                        const outputError = outputPayload.error
-                            || statusPayload.error
-                            || statusPayload.message;
-                        if (typeof outputError === "string" && outputError.trim()) {
-                            throw new Error(outputError);
-                        }
-
-                        const audioBase64 = outputPayload.audio_base64 || statusPayload.audio_base64;
-                        const audioUrl = outputPayload.audio_url || statusPayload.audio_url;
-
-                        let wavBytes = null;
-                        if (typeof audioBase64 === "string" && audioBase64.trim()) {
-                            wavBytes = decodeBase64ToBytes(audioBase64);
-                        } else if (typeof audioUrl === "string" && audioUrl.trim()) {
-                            wavBytes = await fetchAudioFromUrl(audioUrl);
-                        } else {
-                            throw new Error("RunPod completed but returned no audio.");
-                        }
-
-                        wavBlob = new Blob([wavBytes], { type: "audio/wav" });
-                        break;
-                    }
-
-                    if (!wavBlob) {
-                        throw new Error(
-                            `RunPod polling timed out after ${timeoutSeconds} seconds.`,
-                        );
-                    }
-                } else {
-                    const response = await fetch(`${API_BASE_URL}/tts/download`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            text: text.trim(),
-                            language,
-                            voice_id: voice || undefined,
-                            reading_mode: DEFAULT_READING_MODE,
-                        }),
-                    });
-
-                    if (!response.ok) {
-                        const errorPayload = await response.json().catch(() => ({ error: "Unknown generation error" }));
-                        throw new Error(errorPayload.error || "Generation failed");
-                    }
-
-                    wavBlob = await response.blob();
-                }
-
-                generatedWavBlobRef.current = wavBlob;
-
-                // Extract audio data for player
-                const arrayBuffer = await wavBlob.arrayBuffer();
-                const wavData = new Uint8Array(arrayBuffer);
-                const inferredSampleRate = wavData.byteLength >= 28 ? readUint32LE(wavData, 24) : 22050;
-                sampleRateRef.current = inferredSampleRate || 22050;
-                controller.sampleRate = sampleRateRef.current;
-
-                if (wavData.byteLength > 44) {
-                    // Skip WAV header (44 bytes) and feed raw PCM to player
-                    const pcmData = new Int16Array(arrayBuffer, 44, Math.floor((wavData.byteLength - 44) / 2));
-                    if (pcmData.length > 0) {
-                        controller.addChunk(pcmData);
-                    }
-                }
-                controller.markGenerationDone();
-
-                setDownloadReady(true);
-                setPlayerVisible(true);
-                setStreamProgress(100);
-                setIsGenerating(false);
-                setStatus({ text: "Ready. You can listen or download WAV.", tone: "success" });
-                syncPlayerUi(controller);
-            } catch (error) {
-                console.error("[TTS] Non-streaming error:", error);
-                setIsGenerating(false);
-                setStatus({ text: `Error: ${error.message}`, tone: "error" });
+        try {
+            const submitResponse = await submitTtsJob(requestPayload);
+            const jobId = String(submitResponse?.id || "").trim();
+            if (!jobId) {
+                throw new Error("TTS job submit did not return a job id.");
             }
+
+            writePendingJobSnapshot(jobId, requestPayload);
+            setActiveJobId(jobId);
+            activeJobIdRef.current = jobId;
+            setStatus({ text: "Job submitted. Waiting for status...", tone: "idle" });
+            setStreamProgress(20);
+            void pollJobUntilTerminal(jobId);
+        } catch (error) {
+            setIsGenerating(false);
+            setIsCancelling(false);
+            clearActivePendingJob();
+            setStatus({ text: `Error: ${error instanceof Error ? error.message : String(error)}`, tone: "error" });
+            resetGenerationTracking();
+        }
+    }, [
+        clearActivePendingJob,
+        isGenerating,
+        isRunpodMode,
+        language,
+        pollJobUntilTerminal,
+        resetGenerationTracking,
+        syncPlayerUi,
+        text,
+        voice,
+    ]);
+
+    const cancelGeneration = useCallback(async () => {
+        const jobId = activeJobIdRef.current;
+        if (!jobId || !isGenerating) return;
+
+        setIsCancelling(true);
+        setStatus({ text: "Cancelling active job...", tone: "idle" });
+
+        try {
+            await cancelTtsJob(jobId);
+            setStatus({ text: "Cancel requested. Waiting for terminal status...", tone: "idle" });
+        } catch (error) {
+            setIsCancelling(false);
+            setStatus({ text: `Cancel failed: ${error instanceof Error ? error.message : String(error)}`, tone: "error" });
+        }
+    }, [isGenerating]);
+
+    const handlePrimaryAction = useCallback(() => {
+        if (isGenerating) {
+            void cancelGeneration();
+            return;
+        }
+        void startGeneration();
+    }, [cancelGeneration, isGenerating, startGeneration]);
+
+    const downloadAudio = useCallback(async () => {
+        if (isGenerating) {
+            setStatus({ text: "Wait for generation to finish before downloading.", tone: "error" });
             return;
         }
 
-        try {
-            const response = await fetch(`${API_BASE_URL}/tts`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    text: text.trim(),
-                    language,
-                    voice_id: voice || undefined,
-                    reading_mode: DEFAULT_READING_MODE,
-                }),
-            });
-
-            if (!response.ok) {
-                const errorPayload = await response.json().catch(() => ({ error: "Unknown generation error" }));
-                throw new Error(errorPayload.error || "Generation failed");
-            }
-
-            sampleRateRef.current = parseInt(response.headers.get("X-Audio-Sample-Rate"), 10) || 22050;
-            controller.sampleRate = sampleRateRef.current;
-
-            if (!response.body) {
-                throw new Error("Audio stream is unavailable");
-            }
-
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-            let readBuffer = new Uint8Array(0);
-            let parseState = "metadata_size";
-            let expectedMetadataSize = 0;
-            let expectedAudioSize = 0;
-            const chunkTimes = [];
-            let lastChunkTime = Date.now();
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) {
-                    controller.markGenerationDone();
-                    break;
-                }
-
-                readBuffer = concatUint8(readBuffer, value);
-
-                while (readBuffer.length > 0) {
-                    if (parseState === "metadata_size") {
-                        if (readBuffer.length < 4) break;
-                        expectedMetadataSize = readUint32LE(readBuffer, 0);
-                        readBuffer = readBuffer.slice(4);
-                        parseState = "metadata";
-                    }
-
-                    if (parseState === "metadata") {
-                        if (readBuffer.length < expectedMetadataSize) break;
-                        const metadataBytes = readBuffer.slice(0, expectedMetadataSize);
-                        const metadata = JSON.parse(decoder.decode(metadataBytes));
-                        readBuffer = readBuffer.slice(expectedMetadataSize);
-
-                        const metadataTotal = Number(metadata.t);
-                        const metadataLoaded = Number(metadata.c) + 1;
-                        const safeLoaded = Number.isFinite(metadataLoaded)
-                            ? Math.max(0, metadataLoaded)
-                            : loadedChunksRef.current;
-                        const safeTotal = Number.isFinite(metadataTotal)
-                            ? Math.max(0, metadataTotal)
-                            : totalChunksRef.current;
-                        const safeAudioBytes = Number.isFinite(Number(metadata.s))
-                            ? Math.max(0, Number(metadata.s))
-                            : 0;
-
-                        loadedChunksRef.current = safeLoaded;
-                        totalChunksRef.current = Math.max(safeTotal, safeLoaded, 1);
-                        expectedAudioSize = safeAudioBytes;
-
-                        const now = Date.now();
-                        chunkTimes.push(now - lastChunkTime);
-                        lastChunkTime = now;
-
-                        const displayLoaded = Math.min(loadedChunksRef.current, totalChunksRef.current);
-                        const progress = clampPercent((displayLoaded / totalChunksRef.current) * 100);
-                        setStreamProgress(progress);
-                        setBufferCount(Math.min(loadedChunksRef.current, AUTOPLAY_CHUNK_THRESHOLD));
-                        setLoadedChunkCount(displayLoaded);
-                        setTotalChunkCount(totalChunksRef.current);
-
-                        if (chunkTimes.length > 1) {
-                            const avgChunkTime = chunkTimes.reduce((a, b) => a + b, 0) / chunkTimes.length;
-                            const remaining = Math.max(totalChunksRef.current - displayLoaded, 0) * avgChunkTime;
-                            setStatus({
-                                text: remaining > 1000
-                                    ? `~${Math.ceil(remaining / 1000)}s left`
-                                    : "Less than 1s left",
-                                tone: "success",
-                            });
-                        } else {
-                            setStatus({
-                                text: "Estimating time left...",
-                                tone: "success",
-                            });
-                        }
-
-                        parseState = "audio";
-                    }
-
-                    if (parseState === "audio") {
-                        if (readBuffer.length < expectedAudioSize) break;
-
-                        const audioChunk = new Uint8Array(readBuffer.slice(0, expectedAudioSize));
-                        readBuffer = readBuffer.slice(expectedAudioSize);
-                        parseState = "metadata_size";
-                        expectedAudioSize = 0;
-
-                        allAudioChunksRef.current.push(audioChunk);
-
-                        const int16Data = new Int16Array(
-                            audioChunk.buffer,
-                            audioChunk.byteOffset,
-                            audioChunk.byteLength / 2,
-                        );
-                        controller.addChunk(int16Data);
-
-                        if (
-                            !controller.isPlaying
-                            && !autoStartUsedRef.current
-                            && !autoStartLockedByUserRef.current
-                            && loadedChunksRef.current >= AUTOPLAY_CHUNK_THRESHOLD
-                        ) {
-                            controller.play();
-                            autoStartUsedRef.current = true;
-                            setPlayerVisible(true);
-                        }
-                    }
-                }
-            }
-
-            if (allAudioChunksRef.current.length > 0) {
-                generatedWavBlobRef.current = createWavBlobFromChunks(
-                    allAudioChunksRef.current,
-                    sampleRateRef.current,
-                );
-                setDownloadReady(true);
-                setPlayerVisible(true);
-            }
-
-            setStreamProgress(100);
-            setBufferCount(Math.min(loadedChunksRef.current, AUTOPLAY_CHUNK_THRESHOLD));
-            setIsGenerating(false);
-            setStatus({ text: "Ready. You can listen or download WAV.", tone: "success" });
-        } catch (error) {
-            console.error("[TTS] Stream error:", error);
-            setIsGenerating(false);
-            setStatus({ text: `Error: ${error.message}`, tone: "error" });
-        }
-    }, [isRunpodMode, language, text, voice, syncPlayerUi]);
-
-    const downloadAudio = useCallback(async () => {
-        if (!text.trim()) {
-            setStatus({ text: "Enter text before downloading WAV.", tone: "error" });
+        if (!generatedWavBlobRef.current) {
+            setStatus({ text: "Generate audio first.", tone: "error" });
             return;
         }
 
         setIsDownloading(true);
-
         try {
-            if (generatedWavBlobRef.current) {
-                triggerBlobDownload(generatedWavBlobRef.current, "speech.wav");
-                setStatus({ text: "WAV downloaded.", tone: "success" });
-                return;
-            }
-
-            if (isRunpodMode) {
-                setStatus({ text: "Generating audio on RunPod before download...", tone: "idle" });
-                await speak();
-                if (generatedWavBlobRef.current) {
-                    triggerBlobDownload(generatedWavBlobRef.current, "speech.wav");
-                    setStatus({ text: "WAV downloaded.", tone: "success" });
-                    return;
-                }
-                throw new Error("RunPod did not return downloadable audio.");
-            }
-
-            const response = await fetch(`${API_BASE_URL}/tts/download`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    text: text.trim(),
-                    language,
-                    voice_id: voice || undefined,
-                    reading_mode: DEFAULT_READING_MODE,
-                }),
-            });
-
-            if (!response.ok) {
-                const errorPayload = await response.json().catch(() => ({ error: "Unknown download error" }));
-                throw new Error(errorPayload.error || "Download failed");
-            }
-
-            const wavBlob = await response.blob();
-            triggerBlobDownload(wavBlob, "speech.wav");
+            triggerBlobDownload(generatedWavBlobRef.current, "speech.wav");
             setStatus({ text: "WAV downloaded.", tone: "success" });
-            setDownloadReady(true);
         } catch (error) {
-            console.error("[TTS] Download error:", error);
-            setStatus({ text: `Download error: ${error.message}`, tone: "error" });
+            setStatus({ text: `Download error: ${error instanceof Error ? error.message : String(error)}`, tone: "error" });
         } finally {
             setIsDownloading(false);
         }
-    }, [isRunpodMode, language, speak, text, voice]);
+    }, [isGenerating]);
 
     const handleTogglePlayback = useCallback(() => {
         const controller = audioControllerRef.current;
         if (!controller) return;
-
         if (controller.isPlaying) {
-            autoStartLockedByUserRef.current = true;
             controller.pause();
             return;
         }
-
-        autoStartLockedByUserRef.current = false;
-        autoStartUsedRef.current = true;
         controller.play();
         setPlayerVisible(true);
     }, []);
@@ -658,39 +722,45 @@ export const useTtsStudio = () => {
                     ? "Preparing"
                     : "Idle";
 
-    const playerDescription = API_STREAMING_ENABLED
-        ? (playerMode === "buffering"
-            ? "Buffer is refilling. Playback will continue automatically as new chunks arrive."
-            : playerVisible
-                ? "Play or scrub through generated audio while the stream is active."
-                : isGenerating
-                    ? "Transport will unlock as soon as the first buffered chunks are ready."
-                    : "Generate speech to activate streaming playback controls.")
-        : (playerVisible
-            ? "Play or scrub through generated audio. Download is available."
-            : isGenerating
-                ? (isRunpodMode
-                    ? "RunPod is generating audio. Player unlocks after completion."
-                    : "Generating audio. Player unlocks when WAV is ready.")
-                : "Generate speech to activate playback controls.");
+    const playerDescription = playerVisible
+        ? "Play or scrub through generated audio. Download is available."
+        : isGenerating
+            ? (isRunpodMode
+                ? "RunPod is generating audio. Player unlocks after completion."
+                : "Generating audio. Player unlocks when WAV is ready.")
+            : "Generate speech to activate playback controls.";
 
     const generationLabel = isGenerating
-        ? (totalChunkCount > 0
-            ? `Generating ${Math.min(loadedChunkCount, totalChunkCount)}/${totalChunkCount}`
-            : "Generating...")
+        ? (isCancelling ? "Cancelling..." : "Cancel")
         : "Generate Voice";
-    const textCharCount = text.length;
+    const textCharCount = getNormalizedTextCharCount(text);
+    const isTextTooLong = textCharCount > MAX_TEXT_CHARACTERS;
+    const maxTextCharacters = MAX_TEXT_CHARACTERS;
 
-    const canDownload = !isGenerating && !isDownloading && !!text.trim();
+    const canDownload = downloadReady && !isGenerating && !isDownloading && !!generatedWavBlobRef.current;
     const statusClass = status.tone === "success"
         ? "status-success"
         : status.tone === "error"
             ? "status-error"
             : "status-idle";
 
+    const runtimeChunkProgressText = totalChunkCount > 0
+        ? `Processed chunks: ${Math.min(loadedChunkCount, totalChunkCount)} of ${totalChunkCount}`
+        : `Processed chunks: ${Math.max(0, loadedChunkCount)} of ?`;
+    const hasChunkProgress = totalChunkCount > 0 || loadedChunkCount > 0;
+    const actionStatusText = isGenerating
+        ? (isCancelling
+            ? status.text
+            : (hasChunkProgress ? runtimeChunkProgressText : status.text))
+        : status.text;
+    const actionStatusClass = isGenerating ? "status-idle" : statusClass;
+    const isPrimaryActionDisabled = isTextTooLong || (isGenerating && isCancelling);
+
     return {
         text,
         textCharCount,
+        isTextTooLong,
+        maxTextCharacters,
         voice,
         language,
         voices,
@@ -702,11 +772,14 @@ export const useTtsStudio = () => {
         backendNeedsRestart,
         status,
         statusClass,
-        isStreamingEnabled: API_STREAMING_ENABLED,
+        actionStatusText,
+        actionStatusClass,
         isGenerating,
+        isCancelling,
+        activeJobId,
         streamProgress,
-        bufferCount,
         generationLabel,
+        isPrimaryActionDisabled,
         playerVisible,
         isPlaying,
         loadedPercent,
@@ -717,10 +790,10 @@ export const useTtsStudio = () => {
         playerDescription,
         canDownload,
         isDownloading,
-        onTextChange: setText,
+        onTextChange: handleTextChange,
         onVoiceChange: setVoice,
         onLanguageChange: setLanguage,
-        onSpeak: speak,
+        onPrimaryAction: handlePrimaryAction,
         onDownload: downloadAudio,
         onTogglePlayback: handleTogglePlayback,
         onSeek: handleSeek,

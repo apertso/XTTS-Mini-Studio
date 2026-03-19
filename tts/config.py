@@ -31,39 +31,18 @@ TOKENIZER_CHAR_LIMITS = {
     "ko": 95,
 }
 
-CHUNK_SAFETY_MARGIN = 16
-MIN_CHUNK_LENGTH = 80
-DEFAULT_CHUNK_LENGTH = 330
-STORY_CHUNK_LIMIT_ADJUST = -12
+DEFAULT_CHUNK_LENGTH = 250
+MAX_TEXT_CHARACTERS = 25_000
 STREAM_CROSSFADE_MS = 32
 
-READING_MODE_DEFAULT = "default"
-READING_MODE_STORY = "story"
-READING_PROFILES = {
-    READING_MODE_DEFAULT: {
-        "synthesis_kwargs": {
-            "temperature": 0.65,
-            "top_p": 0.8,
-            "top_k": 40,
-            "repetition_penalty": 7.0,
-            "length_penalty": 1.0,
-        },
-        "chunk_limit_adjust": 0,
-        "inter_chunk_pause_ms": 45,
-    },
-    READING_MODE_STORY: {
-        "synthesis_kwargs": {
-            "speed": 0.92,
-            "temperature": 0.60,
-            "top_p": 0.78,
-            "top_k": 35,
-            "repetition_penalty": 6.5,
-            "length_penalty": 1.0,
-        },
-        "chunk_limit_adjust": STORY_CHUNK_LIMIT_ADJUST,
-        "inter_chunk_pause_ms": 180,
-    },
+DEFAULT_SYNTHESIS_KWARGS = {
+    "temperature": 0.65,
+    "top_p": 0.8,
+    "top_k": 40,
+    "repetition_penalty": 7.0,
+    "length_penalty": 1.0,
 }
+DEFAULT_INTER_CHUNK_PAUSE_MS = 45
 
 MAX_RMS_GAIN = 1.20
 MIN_RMS_GAIN = 0.83
@@ -133,6 +112,8 @@ ALLOWED_PRECISIONS = {PRECISION_AUTO, PRECISION_FP32, PRECISION_FP16}
 
 TTS_HOST = os.getenv("TTS_HOST", "0.0.0.0")
 TTS_PORT = int(os.getenv("TTS_PORT", "5000"))
+LOCAL_JOB_TTL_SECONDS = max(60, int(os.getenv("LOCAL_JOB_TTL_SECONDS", "3600")))
+LOCAL_JOB_MAX_TERMINAL = max(10, int(os.getenv("LOCAL_JOB_MAX_TERMINAL", "200")))
 
 
 def validate_mode(mode: str) -> str:

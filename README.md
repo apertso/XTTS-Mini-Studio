@@ -6,7 +6,7 @@ Live Demo - https://apertso.github.io/XTTS-Mini-Studio/
 
 ## What Is Where
 
-- Backend API: `main.py` + `tts/`
+- Backend API: `tts/` (entrypoint: `python -m tts`)
 - Frontend app: static files in `docs/`
 
 ## Quick Start

@@ -1,5 +1,6 @@
 const RUNPOD_ROUTE = '/api/runpod';
 const RUNPOD_STATUS_PREFIX = '/api/runpod/status/';
+const RUNPOD_CANCEL_PREFIX = '/api/runpod/cancel/';
 const RUNPOD_AUDIO_ROUTE = '/api/runpod/audio';
 
 const parseAllowedOrigins = (value) =>
@@ -53,6 +54,17 @@ const extractStatusJobId = (pathname) => {
   }
 };
 
+const extractCancelJobId = (pathname) => {
+  if (!pathname.startsWith(RUNPOD_CANCEL_PREFIX)) return null;
+  const rawId = pathname.slice(RUNPOD_CANCEL_PREFIX.length);
+  if (!rawId) return null;
+  try {
+    return decodeURIComponent(rawId);
+  } catch {
+    return null;
+  }
+};
+
 const parseHttpUrl = (value) => {
   const candidate = String(value || '').trim();
   if (!candidate) return null;
@@ -86,6 +98,7 @@ export default {
     }
 
     const statusJobId = extractStatusJobId(url.pathname);
+    const cancelJobId = extractCancelJobId(url.pathname);
     if (request.method === 'GET' && statusJobId) {
       try {
         const runpodResponse = await fetch(
@@ -103,6 +116,29 @@ export default {
       } catch (error) {
         return jsonResponse(
           { error: 'Status request failed', details: String(error) },
+          500,
+          corsHeaders
+        );
+      }
+    }
+
+    if (request.method === 'POST' && cancelJobId) {
+      try {
+        const runpodResponse = await fetch(
+          `https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/cancel/${encodeURIComponent(cancelJobId)}`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${env.RUNPOD_API_KEY}`,
+            },
+          }
+        );
+
+        const responseBody = await parseJsonSafe(runpodResponse);
+        return jsonResponse(responseBody, runpodResponse.status, corsHeaders);
+      } catch (error) {
+        return jsonResponse(
+          { error: 'Cancel request failed', details: String(error) },
           500,
           corsHeaders
         );

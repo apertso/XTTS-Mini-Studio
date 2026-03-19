@@ -48,6 +48,24 @@ export const checkRunpodStatus = async (jobId) => {
     return response.json();
 };
 
+export const cancelRunpodJob = async (jobId) => {
+    const normalizedJobId = String(jobId || "").trim();
+    if (!normalizedJobId) {
+        throw new Error("RunPod cancel requires a job id.");
+    }
+
+    const response = await fetch(
+        `${normalizedProxyUrl}/cancel/${encodeURIComponent(normalizedJobId)}`,
+        { method: "POST" },
+    );
+
+    if (!response.ok) {
+        throw new Error(await readProxyError(response, "Cancel request failed"));
+    }
+
+    return response.json();
+};
+
 export const fetchRunpodAudioBytes = async (audioUrl) => {
     const normalizedAudioUrl = String(audioUrl || "").trim();
     if (!normalizedAudioUrl) {

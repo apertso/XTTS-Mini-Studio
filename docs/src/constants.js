@@ -14,23 +14,13 @@ const getNumericSetting = (value, fallback, min) => {
     return Math.max(min, Math.floor(numeric));
 };
 
-const getBooleanSetting = (value, fallback) => {
-    if (typeof value === "boolean") return value;
-    return fallback;
-};
-
 export const API_MODE = getStringSetting(runtimeConfig.apiMode, "runpod").toLowerCase();
 export const API_BASE_URL = getStringSetting(runtimeConfig.apiBaseUrl, "http://localhost:5000");
 export const RUNPOD_PROXY_URL = getStringSetting(runtimeConfig.runpodProxyUrl, "https://twilight-dream-8480.djlokiart.workers.dev/api/runpod");
 export const RUNPOD_POLL_INTERVAL_MS = getNumericSetting(runtimeConfig.runpodPollIntervalMs, 2000, 500);
 export const RUNPOD_TIMEOUT_MS = getNumericSetting(runtimeConfig.runpodTimeoutMs, 900000, 10000);
-export const API_STREAMING_ENABLED = getBooleanSetting(
-    runtimeConfig.apiStreamingEnabled,
-    API_MODE !== "runpod",
-);
-export const AUTOPLAY_CHUNK_THRESHOLD = 5;
+export const MAX_TEXT_CHARACTERS = getNumericSetting(runtimeConfig.maxTextCharacters, 25000, 1);
 export const DEFAULT_LANGUAGE = "en";
-export const DEFAULT_READING_MODE = "default";
 export const RUNPOD_FALLBACK_VOICES = [
     { id: "lila_tretikov", name: "Lila Tretikov", gender: "female", source_type: "reference" },
     { id: "julie_etchingham", name: "Julie Etchingham", gender: "female", source_type: "reference" },
@@ -50,4 +40,5 @@ export const STORAGE_KEYS = {
     text: "tts_text",
     voice: "tts_voice",
     language: "tts_language",
+    pendingJob: "tts_pending_job_v1",
 };

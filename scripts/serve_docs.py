@@ -50,6 +50,16 @@ class DocsHandler(SimpleHTTPRequestHandler):
             return
         super().do_GET()
 
+    def end_headers(self):
+        request_path = urlparse(self.path).path
+        if (
+            request_path.startswith("/src/")
+            or request_path.startswith("/styles/")
+            or request_path == "/config.js"
+        ):
+            self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
     def serve_config_override(self):
         try:
             config_content = self.config_file.read_text(encoding="utf-8")

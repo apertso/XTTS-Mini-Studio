@@ -16,7 +16,8 @@ $SCRIPT_DIR = Split-Path -Parent $PSCommandPath
 $PROJECT_ROOT = (Resolve-Path (Join-Path $SCRIPT_DIR "..")).Path
 $SERVICE_NAME = "XTTS-TTS"
 $PYTHON_EXE = "C:\Program Files\Python311\python.exe"
-$SERVER_SCRIPT = Join-Path $PROJECT_ROOT "main.py"
+$SERVER_ENTRYPOINT = Join-Path $PROJECT_ROOT "tts\__main__.py"
+$SERVER_ARGS = "-m tts"
 $LOG_DIR = Join-Path $PROJECT_ROOT "logs"
 
 # Ensure logs directory exists
@@ -42,14 +43,14 @@ if (!(Test-Path $PYTHON_EXE)) {
     Write-Host "Python not found at $PYTHON_EXE" -ForegroundColor Red
     exit 1
 }
-if (!(Test-Path $SERVER_SCRIPT)) {
-    Write-Host "Server script not found at $SERVER_SCRIPT" -ForegroundColor Red
+if (!(Test-Path $SERVER_ENTRYPOINT)) {
+    Write-Host "Server entrypoint not found at $SERVER_ENTRYPOINT" -ForegroundColor Red
     exit 1
 }
 
 # Install service
 Write-Host "Installing service '$SERVICE_NAME'..." -ForegroundColor Yellow
-& $NSSM_EXE install $SERVICE_NAME $PYTHON_EXE $SERVER_SCRIPT
+& $NSSM_EXE install $SERVICE_NAME $PYTHON_EXE $SERVER_ARGS
 
 # Configure service
 & $NSSM_EXE set $SERVICE_NAME AppDirectory $PROJECT_ROOT

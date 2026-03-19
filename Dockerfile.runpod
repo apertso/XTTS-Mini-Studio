@@ -38,8 +38,7 @@ COPY requirements.runpod.txt /app/requirements.runpod.txt
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-COPY main.py /app/main.py
 COPY tts /app/tts
 COPY assets/voice_references /app/assets/voice_references
 
-CMD ["python", "main.py"]
+CMD ["python", "-m", "tts"]

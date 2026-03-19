@@ -5,13 +5,13 @@ default:
     @just --list
 
 dev:
-    just --jobs 2 dev-api dev-front
+    python scripts/dev.py
 
 dev-api:
-    python main.py
+    python scripts/dev_api.py
 
 dev-front:
-    python scripts/serve_docs.py --mode local --port 8080
+    python scripts/dev_front.py
 
 clean:
     python -c "import pathlib, shutil; [shutil.rmtree(p, ignore_errors=True) for p in pathlib.Path('.').rglob('__pycache__')]; [p.unlink() for p in pathlib.Path('.').rglob('*.pyc')]; [p.unlink() for p in pathlib.Path('.').rglob('*.pyo')]"

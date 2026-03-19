@@ -66,7 +66,7 @@ body {
     color: #1a2333;
 }
 
-.stream-badge {
+.engine-badge {
     margin-top: 0;
     display: inline-flex;
     align-items: center;
@@ -81,7 +81,7 @@ body {
     padding: 0.4rem 1rem;
 }
 
-.stream-badge-dot {
+.engine-badge-dot {
     width: 0.45rem;
     height: 0.45rem;
     border-radius: 999px;
@@ -184,6 +184,17 @@ body {
     font-size: 0.8rem;
     font-weight: 700;
     letter-spacing: 0.03em;
+}
+
+.text-char-count-error {
+    color: #cc5d55;
+}
+
+.text-limit-warning {
+    margin: 0.4rem 0 0;
+    color: #cc5d55;
+    font-size: 0.82rem;
+    font-weight: 700;
 }
 
 .controls-grid {
@@ -504,11 +515,10 @@ body {
     top: 50%;
     height: 0.45rem;
     border-radius: 999px;
-    background: #cbd5e1;
-    transform: translateY(-50%) scaleX(var(--track-scale, 0));
-    transform-origin: left center;
-    transition: transform 0.04s linear;
-    will-change: transform;
+    overflow: hidden;
+    transform: translateY(-50%);
+    z-index: 1;
+    pointer-events: none;
 }
 
 .track-played {
@@ -517,11 +527,29 @@ body {
     top: 50%;
     height: 0.45rem;
     border-radius: 999px;
-    background: #ffa485;
-    transform: translateY(-50%) scaleX(var(--track-scale, 0));
+    overflow: hidden;
+    transform: translateY(-50%);
+    z-index: 2;
+    pointer-events: none;
+}
+
+.track-loaded::before,
+.track-played::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    transform: scaleX(var(--track-scale, 0));
     transform-origin: left center;
     transition: transform 0.04s linear;
     will-change: transform;
+}
+
+.track-loaded::before {
+    background: #cbd5e1;
+}
+
+.track-played::before {
+    background: #ffa485;
 }
 
 .range-input {
@@ -544,13 +572,13 @@ body {
 
 .range-input::-webkit-slider-thumb {
     appearance: none;
-    width: 0.8rem;
-    height: 0.8rem;
-    margin-top: -3px;
-    border-radius: 999px;
+    width: 0;
+    height: 0;
+    margin-top: 0;
     border: 0;
-    background: #fff;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15), 0 0 0 1px rgba(0, 0, 0, 0.05);
+    background: transparent;
+    box-shadow: none;
+    opacity: 0;
 }
 
 .range-input::-moz-range-track {
@@ -559,12 +587,12 @@ body {
 }
 
 .range-input::-moz-range-thumb {
-    width: 0.8rem;
-    height: 0.8rem;
-    border-radius: 999px;
+    width: 0;
+    height: 0;
     border: 0;
-    background: #fff;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15), 0 0 0 1px rgba(0, 0, 0, 0.05);
+    background: transparent;
+    box-shadow: none;
+    opacity: 0;
 }
 
 .track-times {

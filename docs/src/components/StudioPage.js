@@ -17,8 +17,10 @@ export const StudioPage = () => {
                 ${TextInputPanel({
                     text: studio.text,
                     charCount: studio.textCharCount,
+                    maxTextCharacters: studio.maxTextCharacters,
+                    isTextTooLong: studio.isTextTooLong,
                     onTextChange: studio.onTextChange,
-                    onSubmit: studio.onSpeak,
+                    onSubmit: studio.onPrimaryAction,
                 })}
 
                 ${VoiceLanguageControls({
@@ -37,15 +39,13 @@ export const StudioPage = () => {
 
                 <section className="action-panel">
                     ${GenerateButton({
-                        disabled: studio.isGenerating,
+                        disabled: studio.isPrimaryActionDisabled,
                         isGenerating: studio.isGenerating,
                         label: studio.generationLabel,
                         progress: studio.streamProgress,
-                        bufferCount: studio.bufferCount,
-                        showBuffer: studio.isStreamingEnabled,
-                        onClick: studio.onSpeak,
+                        onClick: studio.onPrimaryAction,
                     })}
-                    <p className=${`status-line ${studio.statusClass}`}>${studio.status.text}</p>
+                    <p className=${`status-line ${studio.actionStatusClass}`}>${studio.actionStatusText}</p>
                 </section>
 
                 ${PlayerPanel({

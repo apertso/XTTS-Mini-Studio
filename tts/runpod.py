@@ -4,10 +4,10 @@ import base64
 import os
 import re
 import uuid
-from typing import Any, Dict
+from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlparse
 
-from .config import READING_MODE_DEFAULT, configure_stdio
+from .config import configure_stdio
 from .core import generate_tts
 
 
@@ -81,23 +81,65 @@ def _upload_audio(job: Dict[str, Any], wav_bytes: bytes) -> str:
     return audio_url
 
 
+def _build_progress_reporter(
+    job: Dict[str, Any],
+) -> Optional[Callable[[int, int], None]]:
+    try:
+        import runpod
+    except Exception:
+        return None
+
+    progress_update = getattr(getattr(runpod, "serverless", None), "progress_update", None)
+    if not callable(progress_update):
+        return None
+
+    updates_enabled = True
+
+    def _report(processed_chunks: int, total_chunks: int) -> None:
+        nonlocal updates_enabled
+        if not updates_enabled:
+            return
+
+        safe_processed = max(0, int(processed_chunks))
+        safe_total = max(safe_processed, int(total_chunks))
+        payload = {
+            "progress": {
+                "processed_chunks": safe_processed,
+                "total_chunks": safe_total,
+            },
+            "processed_chunks": safe_processed,
+            "total_chunks": safe_total,
+        }
+
+        try:
+            progress_update(job, payload)
+        except Exception as exc:
+            updates_enabled = False
+            print(f"RunPod progress updates disabled: {exc}")
+
+    return _report
+
+
 def runpod_handler(job: Dict[str, Any]) -> Dict[str, Any]:
     payload = (job or {}).get("input") or {}
+    if "reading_mode" in payload:
+        return {"error": "Field 'reading_mode' is no longer supported; remove it."}
+
     text = payload.get("text", "")
     voice_id = payload.get("voice_id")
     language = payload.get("language", "en")
-    reading_mode = payload.get("reading_mode", READING_MODE_DEFAULT)
 
     if not text:
         return {"error": "No text provided"}
+
+    progress_reporter = _build_progress_reporter(job or {})
 
     try:
         wav_bytes = generate_tts(
             text=text,
             voice_id=voice_id,
             language=language,
-            reading_mode=reading_mode,
-            streaming=False,
+            progress_callback=progress_reporter,
         )
     except Exception as exc:
         return {"error": str(exc)}

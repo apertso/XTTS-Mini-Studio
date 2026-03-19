@@ -3,8 +3,10 @@ from __future__ import annotations
 from contextlib import nullcontext
 import io
 import re
+import threading
+import time
 from pathlib import Path
-from typing import Any, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Iterator, List, Optional, Tuple
 
 from huggingface_hub import snapshot_download
 from huggingface_hub.utils import (
@@ -20,16 +22,17 @@ import torch
 from scipy.io import wavfile
 
 from .config import (
-    CHUNK_SAFETY_MARGIN,
+    DEFAULT_INTER_CHUNK_PAUSE_MS,
     DEFAULT_CHUNK_LENGTH,
+    DEFAULT_SYNTHESIS_KWARGS,
     HF_HOME,
     HF_HOME_ENV_VAR,
     HUGGINGFACE_HUB_CACHE,
     HUGGINGFACE_HUB_CACHE_ENV_VAR,
     LEGACY_MODEL_DIR_ENV_VAR,
     MAX_RMS_GAIN,
+    MAX_TEXT_CHARACTERS,
     MODE,
-    MIN_CHUNK_LENGTH,
     MIN_RMS_GAIN,
     MODEL_DIR_SOURCE,
     MODEL_DIR,
@@ -37,8 +40,6 @@ from .config import (
     MODEL_ID,
     MODEL_ID_ENV_VAR,
     PRECISION_FP16,
-    READING_MODE_DEFAULT,
-    READING_PROFILES,
     REQUESTED_PRECISION,
     STREAM_CROSSFADE_MS,
     TOKENIZER_CHAR_LIMITS,
@@ -52,6 +53,9 @@ SENTENCE_END_PATTERN = re.compile("[.!?\u2026][\"')\\]]*$")
 
 _RUNTIME: Optional[Tuple[Any, Any]] = None
 _PRECISION_STATE: Optional[dict[str, Any]] = None
+_VOICE_CONDITIONING_CACHE: dict[str, tuple[Any, Any]] = {}
+_VOICE_CONDITIONING_CACHE_LOCK = threading.Lock()
+ProgressCallback = Callable[[int, int], None]
 
 REQUIRED_MODEL_FILES = {
     "config": "config.json",
@@ -64,6 +68,10 @@ HF_ALLOW_PATTERNS = tuple(REQUIRED_MODEL_FILES.values())
 
 class ModelResolutionError(RuntimeError):
     """Raised when XTTS model resolution through local path/cache/download fails."""
+
+
+class GenerationCancelledError(RuntimeError):
+    """Raised when generation is cancelled via cooperative cancellation signal."""
 
 
 def format_log_preview(text: str, limit: int = 50) -> str:
@@ -295,21 +303,87 @@ def _autocast_context():
 
 def _synthesize_chunk_once(
     model: Any,
-    xtts_config: Any,
     chunk: str,
     language: str,
-    voice_selection: dict,
+    conditioning: tuple[Any, Any],
     synthesis_kwargs: dict,
 ):
+    gpt_cond_latent, speaker_embedding = conditioning
     with _autocast_context():
-        return model.synthesize(
+        return model.inference(
             text=chunk,
-            config=xtts_config,
-            speaker_wav=voice_selection["speaker_wav"],
-            speaker_id=voice_selection["speaker_id"],
             language=language,
+            gpt_cond_latent=gpt_cond_latent,
+            speaker_embedding=speaker_embedding,
             **synthesis_kwargs,
         )
+
+
+def _resolve_voice_cache_key(voice_selection: dict) -> str:
+    speaker_wav = voice_selection.get("speaker_wav")
+    if speaker_wav:
+        return f"reference:{Path(speaker_wav).resolve()}"
+
+    speaker_id = voice_selection.get("speaker_id")
+    if speaker_id:
+        return f"preset:{speaker_id}"
+
+    raise ValueError("Invalid voice selection: missing speaker_wav/speaker_id")
+
+
+def _compute_voice_conditioning(model: Any, xtts_config: Any, voice_selection: dict) -> tuple[Any, Any]:
+    speaker_wav = voice_selection.get("speaker_wav")
+    if speaker_wav:
+        return model.get_conditioning_latents(
+            audio_path=speaker_wav,
+            gpt_cond_len=xtts_config.gpt_cond_len,
+            gpt_cond_chunk_len=xtts_config.gpt_cond_chunk_len,
+            max_ref_length=xtts_config.max_ref_len,
+            sound_norm_refs=xtts_config.sound_norm_refs,
+        )
+
+    speaker_id = voice_selection.get("speaker_id")
+    if not speaker_id:
+        raise ValueError("Invalid voice selection: missing speaker_wav/speaker_id")
+
+    if model.speaker_manager is None or speaker_id not in model.speaker_manager.speakers:
+        raise ValueError(f"Unknown XTTS preset speaker_id: {speaker_id}")
+
+    speaker_values = model.speaker_manager.speakers[speaker_id]
+    if isinstance(speaker_values, dict):
+        gpt_cond_latent = speaker_values.get("gpt_cond_latent")
+        speaker_embedding = speaker_values.get("speaker_embedding")
+        if gpt_cond_latent is not None and speaker_embedding is not None:
+            return gpt_cond_latent, speaker_embedding
+
+    gpt_cond_latent, speaker_embedding = speaker_values.values()
+    return gpt_cond_latent, speaker_embedding
+
+
+def get_voice_conditioning(model: Any, xtts_config: Any, voice_selection: dict) -> tuple[Any, Any]:
+    cache_key = _resolve_voice_cache_key(voice_selection)
+
+    with _VOICE_CONDITIONING_CACHE_LOCK:
+        cached = _VOICE_CONDITIONING_CACHE.get(cache_key)
+
+    if cached is not None:
+        print(f"conditioning_cache_hit: key={cache_key}")
+        return cached
+
+    print(f"conditioning_cache_miss: key={cache_key}")
+    started_at = time.perf_counter()
+    computed = _compute_voice_conditioning(model, xtts_config, voice_selection)
+    elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+
+    with _VOICE_CONDITIONING_CACHE_LOCK:
+        cached = _VOICE_CONDITIONING_CACHE.get(cache_key)
+        if cached is not None:
+            print(f"conditioning_cache_race_reuse: key={cache_key}")
+            return cached
+        _VOICE_CONDITIONING_CACHE[cache_key] = computed
+
+    print(f"conditioning_cache_store: key={cache_key}, prep_ms={elapsed_ms:.1f}")
+    return computed
 
 
 def _disable_autocast_after_runtime_error(exc: RuntimeError) -> bool:
@@ -342,37 +416,15 @@ def normalize_language_code(language: str) -> str:
     return lang.split("-")[0]
 
 
-def resolve_reading_profile(reading_mode: Optional[str]) -> dict:
-    mode = (reading_mode or READING_MODE_DEFAULT).strip().lower()
-    profile = READING_PROFILES.get(mode)
-    if profile is None:
-        available = ", ".join(sorted(READING_PROFILES.keys()))
-        raise ValueError(f"Invalid reading_mode: {reading_mode}. Expected one of: {available}")
-
-    return {
-        "mode": mode,
-        "synthesis_kwargs": dict(profile["synthesis_kwargs"]),
-        "chunk_limit_adjust": int(profile["chunk_limit_adjust"]),
-        "inter_chunk_pause_ms": int(profile["inter_chunk_pause_ms"]),
-    }
-
-
-def resolve_chunk_length(language: str, chunk_limit_adjust: int = 0) -> int:
+def resolve_chunk_length(language: str) -> int:
     normalized_language = normalize_language_code(language)
     tokenizer_limit = TOKENIZER_CHAR_LIMITS.get(normalized_language)
 
     base_limit = DEFAULT_CHUNK_LENGTH
     if tokenizer_limit is not None:
-        base_limit = min(base_limit, tokenizer_limit - CHUNK_SAFETY_MARGIN)
+        base_limit = min(base_limit, max(1, tokenizer_limit - 1))
 
-    adjusted_limit = base_limit + int(chunk_limit_adjust)
-    adjusted_limit = max(1, adjusted_limit)
-    adjusted_limit = max(MIN_CHUNK_LENGTH, adjusted_limit)
-
-    if tokenizer_limit is not None:
-        adjusted_limit = min(adjusted_limit, max(1, tokenizer_limit - 1))
-
-    return adjusted_limit
+    return max(1, base_limit)
 
 
 def split_long_sentence(sentence: str, max_length: int) -> List[str]:
@@ -521,16 +573,14 @@ def extract_audio_array(outputs) -> np.ndarray:
 
 
 def synthesize_chunk(
-    chunk: str, language: str, voice_selection: dict, synthesis_kwargs: dict
+    model: Any, chunk: str, language: str, conditioning: tuple[Any, Any], synthesis_kwargs: dict
 ) -> np.ndarray:
-    model, xtts_config = get_runtime()
     try:
         outputs = _synthesize_chunk_once(
             model=model,
-            xtts_config=xtts_config,
             chunk=chunk,
             language=language,
-            voice_selection=voice_selection,
+            conditioning=conditioning,
             synthesis_kwargs=synthesis_kwargs,
         )
     except RuntimeError as exc:
@@ -538,31 +588,38 @@ def synthesize_chunk(
             raise
         outputs = _synthesize_chunk_once(
             model=model,
-            xtts_config=xtts_config,
             chunk=chunk,
             language=language,
-            voice_selection=voice_selection,
+            conditioning=conditioning,
             synthesis_kwargs=synthesis_kwargs,
         )
     return extract_audio_array(outputs)
 
 
 def generate_audio_chunks(
-    text_chunks: List[str], language: str, voice_selection: dict, reading_profile: dict
+    text_chunks: List[str],
+    language: str,
+    voice_selection: dict,
+    progress_callback: Optional[ProgressCallback] = None,
+    cancel_event: threading.Event | None = None,
 ) -> Iterator[bytes]:
-    sample_rate = get_sample_rate()
+    model, xtts_config = get_runtime()
+    sample_rate = int(xtts_config.audio.sample_rate)
     overlap_samples = int(sample_rate * STREAM_CROSSFADE_MS / 1000)
     fade_samples = int(sample_rate * 0.01)
-    synthesis_kwargs = reading_profile["synthesis_kwargs"]
-    inter_chunk_pause_ms = int(reading_profile["inter_chunk_pause_ms"])
+    synthesis_kwargs = dict(DEFAULT_SYNTHESIS_KWARGS)
+    inter_chunk_pause_ms = int(DEFAULT_INTER_CHUNK_PAUSE_MS)
     inter_chunk_pause_bytes = create_silence_bytes(inter_chunk_pause_ms, sample_rate)
+    conditioning = get_voice_conditioning(model, xtts_config, voice_selection)
 
     if len(text_chunks) == 0:
         return
 
+    total_chunks = len(text_chunks)
+
     print(
         f"Using {voice_selection['source_type']} voice: "
-        f"{voice_selection['id']} ({voice_selection['name']}), mode={reading_profile['mode']}"
+        f"{voice_selection['id']} ({voice_selection['name']})"
     )
 
     pending_audio: Optional[np.ndarray] = None
@@ -570,10 +627,14 @@ def generate_audio_chunks(
 
     with torch.inference_mode():
         for i, chunk in enumerate(text_chunks):
+            if cancel_event is not None and cancel_event.is_set():
+                raise GenerationCancelledError("Generation was cancelled.")
             print(f"Generating chunk {i + 1}/{len(text_chunks)}")
             audio_float = np.clip(
-                synthesize_chunk(chunk, language, voice_selection, synthesis_kwargs), -1.0, 1.0
+                synthesize_chunk(model, chunk, language, conditioning, synthesis_kwargs), -1.0, 1.0
             ).astype(np.float32)
+            if progress_callback is not None:
+                progress_callback(i + 1, total_chunks)
             if len(audio_float) == 0:
                 continue
 
@@ -614,65 +675,51 @@ def generate_audio_chunks(
 
 
 def _prepare_generation(
-    text: str, voice_id: Optional[str], language: str, reading_mode: Optional[str]
-) -> Tuple[List[str], str, dict, dict]:
+    text: str, voice_id: Optional[str], language: str
+) -> Tuple[List[str], str, dict]:
     text = (text or "").strip()
     if not text:
         raise ValueError("No text provided")
+    if len(text) > MAX_TEXT_CHARACTERS:
+        raise ValueError(
+            f"Text exceeds maximum length: {MAX_TEXT_CHARACTERS} characters "
+            f"(got {len(text)})."
+        )
 
     normalized_language = normalize_language_code(language)
     voice_selection = resolve_voice(voice_id)
-    reading_profile = resolve_reading_profile(reading_mode)
 
-    chunk_limit = resolve_chunk_length(
-        normalized_language, chunk_limit_adjust=reading_profile["chunk_limit_adjust"]
-    )
+    chunk_limit = resolve_chunk_length(normalized_language)
     text_chunks = split_text(text, max_length=chunk_limit)
     if len(text_chunks) == 0:
         raise ValueError("No valid text provided")
 
     print(
         f"Total chunks: {len(text_chunks)}, chunk_limit={chunk_limit}, "
-        f"language={normalized_language}, mode={reading_profile['mode']}"
+        f"language={normalized_language}"
     )
-    return text_chunks, normalized_language, voice_selection, reading_profile
+    return text_chunks, normalized_language, voice_selection
 
 
 def generate_tts(
     text: str,
     voice_id: Optional[str] = None,
     language: str = "en",
-    reading_mode: Optional[str] = None,
-    streaming: bool = False,
+    progress_callback: Optional[ProgressCallback] = None,
+    cancel_event: threading.Event | None = None,
 ):
-    text_chunks, normalized_language, voice_selection, reading_profile = _prepare_generation(
+    text_chunks, normalized_language, voice_selection = _prepare_generation(
         text=text,
         voice_id=voice_id,
         language=language,
-        reading_mode=reading_mode,
     )
-    total_chunks = len(text_chunks)
-
-    if streaming:
-        def _stream() -> Iterator[Tuple[int, int, bytes]]:
-            for i, audio_bytes in enumerate(
-                generate_audio_chunks(
-                    text_chunks=text_chunks,
-                    language=normalized_language,
-                    voice_selection=voice_selection,
-                    reading_profile=reading_profile,
-                )
-            ):
-                yield i, total_chunks, audio_bytes
-
-        return _stream()
-
     audio_chunks = []
     for audio_bytes in generate_audio_chunks(
         text_chunks=text_chunks,
         language=normalized_language,
         voice_selection=voice_selection,
-        reading_profile=reading_profile,
+        progress_callback=progress_callback,
+        cancel_event=cancel_event,
     ):
         if audio_bytes:
             audio_chunks.append(audio_bytes)

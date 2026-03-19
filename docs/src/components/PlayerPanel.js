@@ -49,6 +49,7 @@ export const PlayerPanel = ({
                                 type="range"
                                 min="0"
                                 max="100"
+                                step="0.01"
                                 value=${safePlayed}
                                 onInput=${onSeek}
                                 onChange=${onSeek}

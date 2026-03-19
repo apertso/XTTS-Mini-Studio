@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tts.config import (
+from .config import (
     HF_HOME,
     HUGGINGFACE_HUB_CACHE,
     MODE,
@@ -9,7 +9,7 @@ from tts.config import (
     configure_stdio,
     validate_mode,
 )
-from tts.core import get_runtime
+from .core import get_runtime
 
 
 def _format_path(path) -> str:
@@ -31,13 +31,13 @@ def main() -> None:
     if mode == "local":
         # Keep local API behavior unchanged: load once at startup.
         get_runtime()
-        from tts.server import start_flask
+        from .server import start_flask
 
         start_flask()
         return
 
     print("RunPod mode: XTTS runtime will load lazily on first request.")
-    from tts.runpod import start_runpod
+    from .runpod import start_runpod
 
     start_runpod()
 
