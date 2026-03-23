@@ -3,7 +3,7 @@ REM Build and push Runpod Docker image
 REM Usage: build-runpod.cmd [version_tag]
 REM Example: build-runpod.cmd v1.0.1
 
-set "DOCKER_REPO=apertso/xtts-runpod"
+set "DOCKER_REPO=apertso/tts-runpod"
 set "VERSION_TAG=%~1"
 set "AUTO_TAG=0"
 

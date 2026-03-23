@@ -23,7 +23,7 @@ import {
     triggerBlobDownload,
 } from "../utils/audioUtils.js";
 
-const { useCallback, useEffect, useMemo, useRef, useState } = React;
+const { useCallback, useEffect, useRef, useState } = React;
 
 const INITIAL_STATUS = { text: "Ready to synthesize.", tone: "idle" };
 const RUNPOD_MODE = "runpod";
@@ -127,7 +127,7 @@ const readPendingJobSnapshot = () => {
             submittedAt: Number(parsed.submittedAt) || Date.now(),
             request: {
                 text: String(request.text || ""),
-                language: String(request.language || DEFAULT_LANGUAGE),
+                language: DEFAULT_LANGUAGE,
                 voice_id: request.voice_id ? String(request.voice_id) : "",
             },
         };
@@ -144,7 +144,7 @@ const writePendingJobSnapshot = (jobId, requestPayload) => {
         submittedAt: Date.now(),
         request: {
             text: String(requestPayload?.text || ""),
-            language: String(requestPayload?.language || DEFAULT_LANGUAGE),
+            language: DEFAULT_LANGUAGE,
             voice_id: requestPayload?.voice_id ? String(requestPayload.voice_id) : "",
         },
     };
@@ -158,7 +158,6 @@ const clearPendingJobSnapshot = () => {
 export const useTtsStudio = () => {
     const [text, setText] = useState("");
     const [voice, setVoice] = useState("");
-    const [language, setLanguage] = useState(DEFAULT_LANGUAGE);
     const [voices, setVoices] = useState([]);
     const [voicesReady, setVoicesReady] = useState(false);
     const [voiceLoadFailed, setVoiceLoadFailed] = useState(false);
@@ -180,7 +179,7 @@ export const useTtsStudio = () => {
 
     const audioControllerRef = useRef(null);
     const generatedWavBlobRef = useRef(null);
-    const sampleRateRef = useRef(22050);
+    const sampleRateRef = useRef(24000);
     const loadedChunksRef = useRef(0);
     const totalChunksRef = useRef(0);
     const pollingTokenRef = useRef(0);
@@ -190,27 +189,6 @@ export const useTtsStudio = () => {
     useEffect(() => {
         activeJobIdRef.current = activeJobId;
     }, [activeJobId]);
-
-    const selectedVoice = useMemo(
-        () => voices.find((item) => item.id === voice) || null,
-        [voices, voice],
-    );
-
-    const referenceVoices = useMemo(
-        () => voices.filter((item) => item.source_type === "reference"),
-        [voices],
-    );
-
-    const presetVoices = useMemo(
-        () => voices.filter((item) => item.source_type !== "reference"),
-        [voices],
-    );
-
-    const backendNeedsRestart = !isRunpodMode
-        && voicesReady
-        && !voiceLoadFailed
-        && voices.length > 0
-        && referenceVoices.length === 0;
 
     const syncPlayerUi = useCallback((controller) => {
         const loaded = controller.loadedDuration > 0 ? 100 : 0;
@@ -289,8 +267,8 @@ export const useTtsStudio = () => {
 
         const arrayBuffer = await wavBlob.arrayBuffer();
         const wavData = new Uint8Array(arrayBuffer);
-        const inferredSampleRate = wavData.byteLength >= 28 ? readUint32LE(wavData, 24) : 22050;
-        sampleRateRef.current = inferredSampleRate || 22050;
+        const inferredSampleRate = wavData.byteLength >= 28 ? readUint32LE(wavData, 24) : 24000;
+        sampleRateRef.current = inferredSampleRate || 24000;
         controller.sampleRate = sampleRateRef.current;
 
         if (wavData.byteLength > 44) {
@@ -456,14 +434,12 @@ export const useTtsStudio = () => {
 
         const savedText = localStorage.getItem(STORAGE_KEYS.text) || "";
         const savedVoice = localStorage.getItem(STORAGE_KEYS.voice) || "";
-        const savedLanguage = localStorage.getItem(STORAGE_KEYS.language) || DEFAULT_LANGUAGE;
         const pendingSnapshot = readPendingJobSnapshot();
         if (!pendingSnapshot) {
             clearPendingJobSnapshot();
         }
 
         setText(pendingSnapshot?.request?.text || savedText);
-        setLanguage(pendingSnapshot?.request?.language || savedLanguage);
 
         let cancelled = false;
         (async () => {
@@ -500,15 +476,8 @@ export const useTtsStudio = () => {
                     const hasRequestedVoice = availableVoices.some((item) => item.id === requestedVoice);
                     setVoice(hasRequestedVoice ? requestedVoice : fallbackVoice);
 
-                    if (!pendingSnapshot) {
-                        if (availableVoices.length === 0) {
-                            setStatus({ text: "No voices available.", tone: "error" });
-                        } else if (!availableVoices.some((item) => item.source_type === "reference")) {
-                            setStatus({
-                                text: "Server is missing reference voices. Restart backend if needed.",
-                                tone: "error",
-                            });
-                        }
+                    if (!pendingSnapshot && availableVoices.length === 0) {
+                        setStatus({ text: "No voices available.", tone: "error" });
                     }
                 }
 
@@ -544,10 +513,6 @@ export const useTtsStudio = () => {
     useEffect(() => {
         localStorage.setItem(STORAGE_KEYS.voice, voice);
     }, [voice]);
-
-    useEffect(() => {
-        localStorage.setItem(STORAGE_KEYS.language, language);
-    }, [language]);
 
     const handleTextChange = useCallback((nextText) => {
         const safeText = String(nextText || "");
@@ -589,7 +554,7 @@ export const useTtsStudio = () => {
 
         controller.reset();
         generatedWavBlobRef.current = null;
-        sampleRateRef.current = 22050;
+        sampleRateRef.current = 24000;
         setPlayerVisible(false);
         setDownloadReady(false);
         setTimeDisplay("0:00 / 0:00");
@@ -598,7 +563,7 @@ export const useTtsStudio = () => {
 
         const requestPayload = {
             text: normalizedText,
-            language,
+            language: DEFAULT_LANGUAGE,
             voice_id: voice || undefined,
         };
 
@@ -631,7 +596,6 @@ export const useTtsStudio = () => {
         clearActivePendingJob,
         isGenerating,
         isRunpodMode,
-        language,
         pollJobUntilTerminal,
         resetGenerationTracking,
         syncPlayerUi,
@@ -762,14 +726,9 @@ export const useTtsStudio = () => {
         isTextTooLong,
         maxTextCharacters,
         voice,
-        language,
         voices,
         voicesReady,
         voiceLoadFailed,
-        selectedVoice,
-        referenceVoices,
-        presetVoices,
-        backendNeedsRestart,
         status,
         statusClass,
         actionStatusText,
@@ -792,7 +751,6 @@ export const useTtsStudio = () => {
         isDownloading,
         onTextChange: handleTextChange,
         onVoiceChange: setVoice,
-        onLanguageChange: setLanguage,
         onPrimaryAction: handlePrimaryAction,
         onDownload: downloadAudio,
         onTogglePlayback: handleTogglePlayback,

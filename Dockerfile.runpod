@@ -22,9 +22,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     TTS_MODE=runpod \
-    XTTS_PRECISION=fp16 \
-    MODEL_ID=coqui/XTTS-v2 \
-    MODEL_DIR=/runpod-volume/huggingface-cache/hub \
+    MODEL_ID=hexgrad/Kokoro-82M \
     HF_HOME=/runpod-volume/huggingface-cache \
     HUGGINGFACE_HUB_CACHE=/runpod-volume/huggingface-cache/hub
 
@@ -32,6 +30,7 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libsndfile1 \
+    espeak-ng \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.runpod.txt /app/requirements.runpod.txt
@@ -39,6 +38,5 @@ COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 COPY tts /app/tts
-COPY assets/voice_references /app/assets/voice_references
 
 CMD ["python", "-m", "tts"]

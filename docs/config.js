@@ -1,4 +1,4 @@
-window.__XTTS_CONFIG__ = {
+window.__TTS_CONFIG__ = {
     apiMode: "runpod",
     runpodProxyUrl: "https://twilight-dream-8480.djlokiart.workers.dev/api/runpod",
     apiBaseUrl: "http://localhost:5000",

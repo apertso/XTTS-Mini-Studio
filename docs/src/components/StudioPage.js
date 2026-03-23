@@ -25,16 +25,10 @@ export const StudioPage = () => {
 
                 ${VoiceLanguageControls({
                     voice: studio.voice,
-                    language: studio.language,
                     voices: studio.voices,
                     voicesReady: studio.voicesReady,
                     voiceLoadFailed: studio.voiceLoadFailed,
-                    selectedVoice: studio.selectedVoice,
-                    referenceVoices: studio.referenceVoices,
-                    presetVoices: studio.presetVoices,
-                    backendNeedsRestart: studio.backendNeedsRestart,
                     onVoiceChange: studio.onVoiceChange,
-                    onLanguageChange: studio.onLanguageChange,
                 })}
 
                 <section className="action-panel">

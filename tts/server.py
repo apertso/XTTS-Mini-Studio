@@ -16,13 +16,14 @@ from .config import (
     TTS_HOST,
     TTS_PORT,
     configure_stdio,
+    normalize_language_code,
 )
 from .core import (
     GenerationCancelledError,
     format_log_preview,
     generate_tts,
 )
-from .voices import REFERENCE_VOICES, list_available_voices
+from .voices import list_available_voices
 
 
 configure_stdio()
@@ -266,7 +267,12 @@ def _validate_job_payload(data: dict[str, Any]) -> tuple[dict[str, Any] | None, 
             f"(got {len(text)})."
         )
 
-    language = str(data.get("language", "en")).strip() or "en"
+    raw_language = str(data.get("language", "en")).strip() or "en"
+    try:
+        language = normalize_language_code(raw_language)
+    except ValueError as exc:
+        return None, str(exc)
+
     voice_value = data.get("voice_id")
     voice_id = str(voice_value).strip() if voice_value is not None else None
     if voice_id == "":
@@ -368,9 +374,9 @@ def get_tts_job_audio(job_id: str):
 def health():
     return {
         "status": "ok",
-        "model": "xtts_v2",
+        "model": "kokoro_82m",
         "job_api": True,
-        "reference_voices": len(REFERENCE_VOICES),
+        "supported_languages": ["en"],
     }
 
 

@@ -1,5 +1,5 @@
-const runtimeConfig = (typeof window !== "undefined" && window.__XTTS_CONFIG__)
-    ? window.__XTTS_CONFIG__
+const runtimeConfig = (typeof window !== "undefined" && window.__TTS_CONFIG__)
+    ? window.__TTS_CONFIG__
     : {};
 
 const getStringSetting = (value, fallback = "") => {
@@ -22,23 +22,25 @@ export const RUNPOD_TIMEOUT_MS = getNumericSetting(runtimeConfig.runpodTimeoutMs
 export const MAX_TEXT_CHARACTERS = getNumericSetting(runtimeConfig.maxTextCharacters, 25000, 1);
 export const DEFAULT_LANGUAGE = "en";
 export const RUNPOD_FALLBACK_VOICES = [
-    { id: "lila_tretikov", name: "Lila Tretikov", gender: "female", source_type: "reference" },
-    { id: "julie_etchingham", name: "Julie Etchingham", gender: "female", source_type: "reference" },
-    { id: "david_lammy", name: "David Lammy", gender: "male", source_type: "reference" },
-    { id: "david_harewood", name: "David Harewood", gender: "male", source_type: "reference" },
-    { id: "Claribel Dervla", name: "Claribel Dervla", gender: "female", source_type: "preset" },
-    { id: "Daisy Studious", name: "Daisy Studious", gender: "female", source_type: "preset" },
-    { id: "Gracie Wise", name: "Gracie Wise", gender: "female", source_type: "preset" },
-    { id: "Ana Florence", name: "Ana Florence", gender: "female", source_type: "preset" },
-    { id: "Andrew Chipper", name: "Andrew Chipper", gender: "male", source_type: "preset" },
-    { id: "Viktor Eka", name: "Viktor Eka", gender: "male", source_type: "preset" },
-    { id: "Gilberto Mathias", name: "Gilberto Mathias", gender: "male", source_type: "preset" },
-    { id: "Damien Black", name: "Damien Black", gender: "male", source_type: "preset" },
+    { id: "af_heart", name: "Heart (US)", gender: "female", source_type: "preset", locale: "en-US" },
+    { id: "af_bella", name: "Bella (US)", gender: "female", source_type: "preset", locale: "en-US" },
+    { id: "af_nicole", name: "Nicole (US)", gender: "female", source_type: "preset", locale: "en-US" },
+    { id: "af_sarah", name: "Sarah (US)", gender: "female", source_type: "preset", locale: "en-US" },
+    { id: "af_sky", name: "Sky (US)", gender: "female", source_type: "preset", locale: "en-US" },
+    { id: "am_adam", name: "Adam (US)", gender: "male", source_type: "preset", locale: "en-US" },
+    { id: "am_michael", name: "Michael (US)", gender: "male", source_type: "preset", locale: "en-US" },
+    { id: "bf_emma", name: "Emma (UK)", gender: "female", source_type: "preset", locale: "en-GB" },
+    { id: "bf_isabella", name: "Isabella (UK)", gender: "female", source_type: "preset", locale: "en-GB" },
+    { id: "bf_alice", name: "Alice (UK)", gender: "female", source_type: "preset", locale: "en-GB" },
+    { id: "bf_lily", name: "Lily (UK)", gender: "female", source_type: "preset", locale: "en-GB" },
+    { id: "bm_george", name: "George (UK)", gender: "male", source_type: "preset", locale: "en-GB" },
+    { id: "bm_fable", name: "Fable (UK)", gender: "male", source_type: "preset", locale: "en-GB" },
+    { id: "bm_lewis", name: "Lewis (UK)", gender: "male", source_type: "preset", locale: "en-GB" },
+    { id: "bm_daniel", name: "Daniel (UK)", gender: "male", source_type: "preset", locale: "en-GB" },
 ];
 
 export const STORAGE_KEYS = {
     text: "tts_text",
     voice: "tts_voice",
-    language: "tts_language",
     pendingJob: "tts_pending_job_v1",
 };

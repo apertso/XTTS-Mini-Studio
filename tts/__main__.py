@@ -4,8 +4,8 @@ from .config import (
     HF_HOME,
     HUGGINGFACE_HUB_CACHE,
     MODE,
-    MODEL_DIR,
     MODEL_ID,
+    TTS_DEVICE_SETTING,
     configure_stdio,
     validate_mode,
 )
@@ -19,11 +19,11 @@ def _format_path(path) -> str:
 def main() -> None:
     configure_stdio()
     mode = validate_mode(MODE)
-    print(f"Starting XTTS backend in '{mode}' mode")
+    print(f"Starting Kokoro backend in '{mode}' mode")
     print(
         "Model env startup: "
         f"MODEL_ID={MODEL_ID}, "
-        f"MODEL_DIR={_format_path(MODEL_DIR)}, "
+        f"TTS_DEVICE={TTS_DEVICE_SETTING}, "
         f"HF_HOME={_format_path(HF_HOME)}, "
         f"HUGGINGFACE_HUB_CACHE={_format_path(HUGGINGFACE_HUB_CACHE)}"
     )
@@ -36,7 +36,7 @@ def main() -> None:
         start_flask()
         return
 
-    print("RunPod mode: XTTS runtime will load lazily on first request.")
+    print("RunPod mode: Kokoro runtime will load lazily on first request.")
     from .runpod import start_runpod
 
     start_runpod()

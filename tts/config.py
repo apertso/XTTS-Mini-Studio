@@ -6,55 +6,30 @@ from pathlib import Path
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-VOICE_REFERENCES_DIR = BASE_DIR / "assets" / "voice_references"
-VOICE_REFERENCES_MANIFEST_PATH = VOICE_REFERENCES_DIR / "manifest.json"
-
-VOICE_REFERENCE_SAMPLE_RATE = 22050
-VOICE_REFERENCE_MIN_DURATION = 12.0
-VOICE_REFERENCE_MAX_DURATION = 20.0
-
-TOKENIZER_CHAR_LIMITS = {
-    "en": 250,
-    "de": 253,
-    "fr": 273,
-    "es": 239,
-    "it": 213,
-    "pt": 203,
-    "pl": 224,
-    "zh": 82,
-    "ar": 166,
-    "ru": 182,
-    "nl": 251,
-    "tr": 226,
-    "ja": 71,
-    "hu": 224,
-    "ko": 95,
-}
 
 DEFAULT_CHUNK_LENGTH = 250
 MAX_TEXT_CHARACTERS = 25_000
 STREAM_CROSSFADE_MS = 32
-
-DEFAULT_SYNTHESIS_KWARGS = {
-    "temperature": 0.65,
-    "top_p": 0.8,
-    "top_k": 40,
-    "repetition_penalty": 7.0,
-    "length_penalty": 1.0,
-}
 DEFAULT_INTER_CHUNK_PAUSE_MS = 45
+
+# Kokoro generation is less knob-heavy than the previous runtime; keep v1 defaults minimal.
+DEFAULT_SYNTHESIS_KWARGS = {
+    "speed": 1.0,
+}
 
 MAX_RMS_GAIN = 1.20
 MIN_RMS_GAIN = 0.83
 
 MODEL_ID_ENV_VAR = "MODEL_ID"
-MODEL_DIR_ENV_VAR = "MODEL_DIR"
-LEGACY_MODEL_DIR_ENV_VAR = "XTTS_MODEL_DIR"
 HF_HOME_ENV_VAR = "HF_HOME"
 HUGGINGFACE_HUB_CACHE_ENV_VAR = "HUGGINGFACE_HUB_CACHE"
+TTS_DEVICE_ENV_VAR = "TTS_DEVICE"
 
-DEFAULT_MODEL_ID = "coqui/XTTS-v2"
-DEFAULT_LOCAL_MODEL_DIR = BASE_DIR / "models" / "xtts_v2"
+DEFAULT_MODEL_ID = "hexgrad/Kokoro-82M"
+
+DEFAULT_LANGUAGE = "en"
+SUPPORTED_LANGUAGES = ("en",)
+ALLOWED_TTS_DEVICES = {"auto", "cuda", "cpu"}
 
 
 def _optional_env(var_name: str) -> str | None:
@@ -73,21 +48,6 @@ def resolve_model_id() -> str:
     return _optional_env(MODEL_ID_ENV_VAR) or DEFAULT_MODEL_ID
 
 
-def resolve_model_dir() -> tuple[Path | None, str]:
-    model_dir_env = _optional_env(MODEL_DIR_ENV_VAR)
-    if model_dir_env:
-        return _resolve_path(model_dir_env), MODEL_DIR_ENV_VAR
-
-    legacy_model_dir_env = _optional_env(LEGACY_MODEL_DIR_ENV_VAR)
-    if legacy_model_dir_env:
-        return _resolve_path(legacy_model_dir_env), LEGACY_MODEL_DIR_ENV_VAR
-
-    if DEFAULT_LOCAL_MODEL_DIR.exists():
-        return DEFAULT_LOCAL_MODEL_DIR.resolve(), "default_local_model_dir"
-
-    return None, "unset"
-
-
 def resolve_optional_path(var_name: str) -> Path | None:
     value = _optional_env(var_name)
     if value is None:
@@ -95,20 +55,45 @@ def resolve_optional_path(var_name: str) -> Path | None:
     return _resolve_path(value)
 
 
+def resolve_tts_device_setting() -> str:
+    raw = (os.getenv(TTS_DEVICE_ENV_VAR, "auto") or "auto").strip().lower()
+    if raw not in ALLOWED_TTS_DEVICES:
+        expected = ", ".join(sorted(ALLOWED_TTS_DEVICES))
+        raise ValueError(
+            f"Invalid {TTS_DEVICE_ENV_VAR}: {raw!r}. Expected one of: {expected}"
+        )
+    return raw
+
+
+def resolve_kokoro_device(device_setting: str) -> str | None:
+    normalized = (device_setting or "auto").strip().lower()
+    if normalized == "auto":
+        return None
+    return normalized
+
+
+def normalize_language_code(language: str | None) -> str:
+    raw = (language or DEFAULT_LANGUAGE).strip().lower()
+    if not raw:
+        return DEFAULT_LANGUAGE
+
+    if raw.startswith("en"):
+        return "en"
+
+    supported = ", ".join(SUPPORTED_LANGUAGES)
+    raise ValueError(
+        f"Unsupported language: {language!r}. Supported languages: [{supported}]"
+    )
+
+
 MODEL_ID = resolve_model_id()
-MODEL_DIR, MODEL_DIR_SOURCE = resolve_model_dir()
 HF_HOME = resolve_optional_path(HF_HOME_ENV_VAR)
 HUGGINGFACE_HUB_CACHE = resolve_optional_path(HUGGINGFACE_HUB_CACHE_ENV_VAR)
+TTS_DEVICE_SETTING = resolve_tts_device_setting()
+TTS_DEVICE = resolve_kokoro_device(TTS_DEVICE_SETTING)
 
 MODE = (os.getenv("TTS_MODE", "local") or "local").strip().lower()
 ALLOWED_MODES = {"local", "runpod"}
-
-PRECISION_ENV_VAR = "XTTS_PRECISION"
-PRECISION_AUTO = "auto"
-PRECISION_FP32 = "fp32"
-PRECISION_FP16 = "fp16"
-DEFAULT_PRECISION = PRECISION_AUTO
-ALLOWED_PRECISIONS = {PRECISION_AUTO, PRECISION_FP32, PRECISION_FP16}
 
 TTS_HOST = os.getenv("TTS_HOST", "0.0.0.0")
 TTS_PORT = int(os.getenv("TTS_PORT", "5000"))
@@ -122,46 +107,6 @@ def validate_mode(mode: str) -> str:
         expected = ", ".join(sorted(ALLOWED_MODES))
         raise ValueError(f"Invalid TTS_MODE: {mode!r}. Expected one of: {expected}")
     return normalized
-
-
-def validate_precision(precision: str) -> str:
-    normalized = (precision or "").strip().lower()
-    if normalized not in ALLOWED_PRECISIONS:
-        expected = ", ".join(sorted(ALLOWED_PRECISIONS))
-        raise ValueError(f"Invalid {PRECISION_ENV_VAR}: {precision!r}. Expected one of: {expected}")
-    return normalized
-
-
-def resolve_requested_precision() -> str:
-    raw = (os.getenv(PRECISION_ENV_VAR, DEFAULT_PRECISION) or DEFAULT_PRECISION).strip().lower()
-    return validate_precision(raw)
-
-
-REQUESTED_PRECISION = resolve_requested_precision()
-
-
-def resolve_effective_precision(
-    mode: str, requested_precision: str, cuda_available: bool
-) -> tuple[str, str | None]:
-    normalized_mode = validate_mode(mode)
-    normalized_precision = validate_precision(requested_precision)
-
-    if not cuda_available:
-        if normalized_precision == PRECISION_FP16:
-            return (
-                PRECISION_FP32,
-                f"{PRECISION_ENV_VAR}=fp16 requested but CUDA is unavailable; falling back to fp32.",
-            )
-        return PRECISION_FP32, None
-
-    if normalized_precision == PRECISION_FP32:
-        return PRECISION_FP32, None
-    if normalized_precision == PRECISION_FP16:
-        return PRECISION_FP16, None
-
-    if normalized_mode == "runpod":
-        return PRECISION_FP16, None
-    return PRECISION_FP32, None
 
 
 def configure_stdio() -> None:

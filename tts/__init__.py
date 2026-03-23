@@ -1,2 +1,1 @@
-"""XTTS backend package with dual runtime modes."""
-
+"""Kokoro backend package with dual runtime modes."""

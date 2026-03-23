@@ -1,73 +1,34 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
 import io
 import re
 import threading
-import time
-from pathlib import Path
 from typing import Any, Callable, Iterator, List, Optional, Tuple
 
-from huggingface_hub import snapshot_download
-from huggingface_hub.utils import (
-    EntryNotFoundError,
-    GatedRepoError,
-    HfHubHTTPError,
-    LocalEntryNotFoundError,
-    RepositoryNotFoundError,
-    RevisionNotFoundError,
-)
 import numpy as np
-import torch
 from scipy.io import wavfile
 
 from .config import (
-    DEFAULT_INTER_CHUNK_PAUSE_MS,
     DEFAULT_CHUNK_LENGTH,
+    DEFAULT_INTER_CHUNK_PAUSE_MS,
     DEFAULT_SYNTHESIS_KWARGS,
-    HF_HOME,
-    HF_HOME_ENV_VAR,
-    HUGGINGFACE_HUB_CACHE,
-    HUGGINGFACE_HUB_CACHE_ENV_VAR,
-    LEGACY_MODEL_DIR_ENV_VAR,
     MAX_RMS_GAIN,
     MAX_TEXT_CHARACTERS,
-    MODE,
     MIN_RMS_GAIN,
-    MODEL_DIR_SOURCE,
-    MODEL_DIR,
-    MODEL_DIR_ENV_VAR,
     MODEL_ID,
-    MODEL_ID_ENV_VAR,
-    PRECISION_FP16,
-    REQUESTED_PRECISION,
     STREAM_CROSSFADE_MS,
-    TOKENIZER_CHAR_LIMITS,
-    resolve_effective_precision,
-    validate_mode,
+    TTS_DEVICE,
+    TTS_DEVICE_SETTING,
+    normalize_language_code,
 )
 from .voices import resolve_voice
 
 
 SENTENCE_END_PATTERN = re.compile("[.!?\u2026][\"')\\]]*$")
 
-_RUNTIME: Optional[Tuple[Any, Any]] = None
-_PRECISION_STATE: Optional[dict[str, Any]] = None
-_VOICE_CONDITIONING_CACHE: dict[str, tuple[Any, Any]] = {}
-_VOICE_CONDITIONING_CACHE_LOCK = threading.Lock()
+_RUNTIME: Optional[dict[str, Any]] = None
+_RUNTIME_LOCK = threading.Lock()
 ProgressCallback = Callable[[int, int], None]
-
-REQUIRED_MODEL_FILES = {
-    "config": "config.json",
-    "checkpoint": "model.pth",
-    "vocab": "vocab.json",
-    "speakers": "speakers_xtts.pth",
-}
-HF_ALLOW_PATTERNS = tuple(REQUIRED_MODEL_FILES.values())
-
-
-class ModelResolutionError(RuntimeError):
-    """Raised when XTTS model resolution through local path/cache/download fails."""
 
 
 class GenerationCancelledError(RuntimeError):
@@ -81,350 +42,64 @@ def format_log_preview(text: str, limit: int = 50) -> str:
     return preview.encode("ascii", errors="backslashreplace").decode("ascii")
 
 
-def _format_path(path: Path | None) -> str:
-    return str(path) if path is not None else "<unset>"
+def _load_runtime() -> dict[str, Any]:
+    from kokoro import KPipeline
+    import torch
 
+    if TTS_DEVICE == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(
+            "TTS_DEVICE is set to 'cuda' but torch.cuda.is_available() is False. "
+            "Install CUDA-enabled torch or switch TTS_DEVICE to 'auto'/'cpu'."
+        )
 
-def _missing_model_files(model_dir: Path) -> list[str]:
-    resolved = model_dir.resolve()
-    missing = []
-    for file_name in REQUIRED_MODEL_FILES.values():
-        if not (resolved / file_name).exists():
-            missing.append(file_name)
-    return missing
-
-
-def resolve_model_paths(model_dir: Path) -> dict[str, Path]:
-    resolved = model_dir.resolve()
-    paths = {
-        key: resolved / file_name for key, file_name in REQUIRED_MODEL_FILES.items()
+    print(
+        "Loading Kokoro runtime "
+        f"(MODEL_ID={MODEL_ID}, requested_device={TTS_DEVICE_SETTING}, "
+        f"torch={torch.__version__}, torch_cuda={torch.version.cuda}, "
+        f"cuda_available={torch.cuda.is_available()})"
+    )
+    pipelines = {
+        "a": KPipeline(lang_code="a", repo_id=MODEL_ID, device=TTS_DEVICE),
+        "b": KPipeline(lang_code="b", repo_id=MODEL_ID, device=TTS_DEVICE),
     }
-    missing = [path.name for path in paths.values() if not path.exists()]
-    if missing:
-        missing_list = ", ".join(sorted(missing))
-        raise FileNotFoundError(
-            "XTTS model directory is missing required files: "
-            f"{missing_list}. Checked: {resolved}. "
-            f"Set {MODEL_DIR_ENV_VAR} (or legacy {LEGACY_MODEL_DIR_ENV_VAR}) "
-            "to a valid XTTS model directory."
-        )
-    return paths
-
-
-def _classify_hf_error(exc: Exception) -> str:
-    if isinstance(exc, GatedRepoError):
-        return "auth issue"
-    if isinstance(exc, HfHubHTTPError):
-        status = exc.response.status_code if exc.response is not None else None
-        if status in {401, 403}:
-            return "auth issue"
-        if status == 404:
-            return "model not found"
-    if isinstance(exc, (RepositoryNotFoundError, RevisionNotFoundError, EntryNotFoundError)):
-        return "model not found"
-    return "download failed"
-
-
-def _resolve_hf_snapshot(cache_dir: Path | None, local_files_only: bool) -> Path:
-    snapshot_path = snapshot_download(
-        repo_id=MODEL_ID,
-        cache_dir=str(cache_dir) if cache_dir is not None else None,
-        local_files_only=local_files_only,
-        allow_patterns=list(HF_ALLOW_PATTERNS),
-    )
-    return Path(snapshot_path).resolve()
-
-
-def resolve_runtime_model_dir() -> Path:
-    print(
-        "Model environment: "
-        f"{MODEL_ID_ENV_VAR}={MODEL_ID}, "
-        f"{MODEL_DIR_ENV_VAR}={_format_path(MODEL_DIR)}, "
-        f"{HF_HOME_ENV_VAR}={_format_path(HF_HOME)}, "
-        f"{HUGGINGFACE_HUB_CACHE_ENV_VAR}={_format_path(HUGGINGFACE_HUB_CACHE)}"
-    )
-    if MODEL_DIR_SOURCE == LEGACY_MODEL_DIR_ENV_VAR:
-        print(
-            f"Model directory resolved from legacy env var {LEGACY_MODEL_DIR_ENV_VAR}; "
-            f"prefer {MODEL_DIR_ENV_VAR}."
-        )
-
-    local_path_issue: str | None = None
-    if MODEL_DIR is not None:
-        if not MODEL_DIR.exists():
-            local_path_issue = f"wrong path: local model directory does not exist ({MODEL_DIR})"
-            print(f"Model directory check: {local_path_issue}")
-        elif not MODEL_DIR.is_dir():
-            local_path_issue = f"wrong path: local model path is not a directory ({MODEL_DIR})"
-            print(f"Model directory check: {local_path_issue}")
-        else:
-            missing = _missing_model_files(MODEL_DIR)
-            if not missing:
-                print(f"Model source: local directory ({MODEL_DIR})")
-                return MODEL_DIR.resolve()
-            local_path_issue = (
-                f"missing files: {', '.join(sorted(missing))} in {MODEL_DIR}"
-            )
-            print(
-                "Model directory check: "
-                f"{local_path_issue}. Falling back to Hugging Face cache/model download."
-            )
-
-    cache_dir = MODEL_DIR if MODEL_DIR is not None else HUGGINGFACE_HUB_CACHE
-    print(
-        f"Checking Hugging Face local cache for '{MODEL_ID}' "
-        f"(cache_dir={_format_path(cache_dir)})"
-    )
-    try:
-        snapshot_path = _resolve_hf_snapshot(cache_dir=cache_dir, local_files_only=True)
-        print(f"Model source: Hugging Face cache (local hit) at {snapshot_path}")
-    except LocalEntryNotFoundError:
-        print("Hugging Face cache status: miss")
-        snapshot_path = None
-    except Exception as exc:
-        print(
-            "Hugging Face cache lookup failed; continuing with online download. "
-            f"Reason: {format_log_preview(str(exc), limit=220)}"
-        )
-        snapshot_path = None
-
-    if snapshot_path is None:
-        print("Attempting XTTS model download from Hugging Face...")
-        try:
-            snapshot_path = _resolve_hf_snapshot(cache_dir=cache_dir, local_files_only=False)
-            print(f"Hugging Face download status: success ({snapshot_path})")
-        except Exception as exc:
-            reason = _classify_hf_error(exc)
-            local_issue_note = (
-                f" local_issue={local_path_issue};" if local_path_issue is not None else ""
-            )
-            raise ModelResolutionError(
-                "XTTS model resolution failed: "
-                f"{reason};{local_issue_note} "
-                f"model_id={MODEL_ID}; cache_dir={_format_path(cache_dir)}; "
-                f"error={format_log_preview(str(exc), limit=280)}"
-            ) from exc
-
-    missing = _missing_model_files(snapshot_path)
-    if missing:
-        missing_list = ", ".join(sorted(missing))
-        raise ModelResolutionError(
-            "XTTS model resolution failed: missing files; "
-            f"required={missing_list}; resolved_path={snapshot_path}; "
-            "check MODEL_DIR/MODEL_ID or Hugging Face cache integrity."
-        )
-
-    print(f"Final XTTS model path: {snapshot_path}")
-    return snapshot_path
-
-
-def _load_runtime() -> Tuple[Any, Any]:
-    global _PRECISION_STATE
-    resolved_model_dir = resolve_runtime_model_dir()
-    model_paths = resolve_model_paths(resolved_model_dir)
-
-    from TTS.tts.configs.xtts_config import XttsConfig
-    from TTS.tts.models.xtts import Xtts
-
-    print("Loading XTTS-v2 model...")
-    config_path = model_paths["config"]
-
-    xtts_config = XttsConfig()
-    xtts_config.load_json(str(config_path))
-
-    model = Xtts(xtts_config)
-    model.load_checkpoint(
-        config=xtts_config,
-        checkpoint_path=str(model_paths["checkpoint"]),
-        vocab_path=str(model_paths["vocab"]),
-        speaker_file_path=str(model_paths["speakers"]),
-        eval=True,
-    )
-
-    mode = validate_mode(MODE)
-    cuda_available = torch.cuda.is_available()
-    effective_precision, precision_note = resolve_effective_precision(
-        mode=mode,
-        requested_precision=REQUESTED_PRECISION,
-        cuda_available=cuda_available,
-    )
-    autocast_enabled = bool(cuda_available and effective_precision == PRECISION_FP16)
-    _PRECISION_STATE = {
-        "mode": mode,
-        "cuda_available": cuda_available,
-        "requested_precision": REQUESTED_PRECISION,
-        "effective_precision": effective_precision,
-        "autocast_enabled": autocast_enabled,
-        "runtime_fallback_triggered": False,
+    effective_devices = {
+        key: str(getattr(getattr(pipeline, "model", None), "device", "unknown"))
+        for key, pipeline in pipelines.items()
     }
-
-    if cuda_available:
-        print(f"Using CUDA GPU: {torch.cuda.get_device_name(0)}")
-        model = model.cuda()
-    else:
-        print("CUDA not available, using CPU")
-
-    print(
-        "Precision policy: "
-        f"requested={REQUESTED_PRECISION}, "
-        f"effective={effective_precision}, "
-        f"mode={mode}, "
-        f"autocast={'on' if autocast_enabled else 'off'}"
+    effective_device_label = ", ".join(
+        f"{key}:{device}" for key, device in sorted(effective_devices.items())
     )
-    if precision_note:
-        print(f"Precision policy note: {precision_note}")
+    runtime = {
+        "pipelines": pipelines,
+        "sample_rate": 24000,
+        "model_id": MODEL_ID,
+        "requested_device": TTS_DEVICE_SETTING,
+        "effective_devices": effective_devices,
+    }
+    print(f"Kokoro runtime loaded. effective_devices={effective_device_label}")
+    return runtime
 
-    model.eval()
-    print("Model loaded!")
-    return model, xtts_config
 
-
-def get_runtime() -> Tuple[Any, Any]:
+def get_runtime() -> dict[str, Any]:
     global _RUNTIME
-    if _RUNTIME is None:
-        _RUNTIME = _load_runtime()
+    if _RUNTIME is not None:
+        return _RUNTIME
+
+    with _RUNTIME_LOCK:
+        if _RUNTIME is None:
+            _RUNTIME = _load_runtime()
+
+    assert _RUNTIME is not None
     return _RUNTIME
 
 
-def get_precision_state() -> dict[str, Any]:
-    global _PRECISION_STATE
-    if _PRECISION_STATE is None:
-        get_runtime()
-    assert _PRECISION_STATE is not None
-    return _PRECISION_STATE
-
-
-def _autocast_context():
-    precision_state = get_precision_state()
-    if precision_state["autocast_enabled"] and precision_state["cuda_available"]:
-        return torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True)
-    return nullcontext()
-
-
-def _synthesize_chunk_once(
-    model: Any,
-    chunk: str,
-    language: str,
-    conditioning: tuple[Any, Any],
-    synthesis_kwargs: dict,
-):
-    gpt_cond_latent, speaker_embedding = conditioning
-    with _autocast_context():
-        return model.inference(
-            text=chunk,
-            language=language,
-            gpt_cond_latent=gpt_cond_latent,
-            speaker_embedding=speaker_embedding,
-            **synthesis_kwargs,
-        )
-
-
-def _resolve_voice_cache_key(voice_selection: dict) -> str:
-    speaker_wav = voice_selection.get("speaker_wav")
-    if speaker_wav:
-        return f"reference:{Path(speaker_wav).resolve()}"
-
-    speaker_id = voice_selection.get("speaker_id")
-    if speaker_id:
-        return f"preset:{speaker_id}"
-
-    raise ValueError("Invalid voice selection: missing speaker_wav/speaker_id")
-
-
-def _compute_voice_conditioning(model: Any, xtts_config: Any, voice_selection: dict) -> tuple[Any, Any]:
-    speaker_wav = voice_selection.get("speaker_wav")
-    if speaker_wav:
-        return model.get_conditioning_latents(
-            audio_path=speaker_wav,
-            gpt_cond_len=xtts_config.gpt_cond_len,
-            gpt_cond_chunk_len=xtts_config.gpt_cond_chunk_len,
-            max_ref_length=xtts_config.max_ref_len,
-            sound_norm_refs=xtts_config.sound_norm_refs,
-        )
-
-    speaker_id = voice_selection.get("speaker_id")
-    if not speaker_id:
-        raise ValueError("Invalid voice selection: missing speaker_wav/speaker_id")
-
-    if model.speaker_manager is None or speaker_id not in model.speaker_manager.speakers:
-        raise ValueError(f"Unknown XTTS preset speaker_id: {speaker_id}")
-
-    speaker_values = model.speaker_manager.speakers[speaker_id]
-    if isinstance(speaker_values, dict):
-        gpt_cond_latent = speaker_values.get("gpt_cond_latent")
-        speaker_embedding = speaker_values.get("speaker_embedding")
-        if gpt_cond_latent is not None and speaker_embedding is not None:
-            return gpt_cond_latent, speaker_embedding
-
-    gpt_cond_latent, speaker_embedding = speaker_values.values()
-    return gpt_cond_latent, speaker_embedding
-
-
-def get_voice_conditioning(model: Any, xtts_config: Any, voice_selection: dict) -> tuple[Any, Any]:
-    cache_key = _resolve_voice_cache_key(voice_selection)
-
-    with _VOICE_CONDITIONING_CACHE_LOCK:
-        cached = _VOICE_CONDITIONING_CACHE.get(cache_key)
-
-    if cached is not None:
-        print(f"conditioning_cache_hit: key={cache_key}")
-        return cached
-
-    print(f"conditioning_cache_miss: key={cache_key}")
-    started_at = time.perf_counter()
-    computed = _compute_voice_conditioning(model, xtts_config, voice_selection)
-    elapsed_ms = (time.perf_counter() - started_at) * 1000.0
-
-    with _VOICE_CONDITIONING_CACHE_LOCK:
-        cached = _VOICE_CONDITIONING_CACHE.get(cache_key)
-        if cached is not None:
-            print(f"conditioning_cache_race_reuse: key={cache_key}")
-            return cached
-        _VOICE_CONDITIONING_CACHE[cache_key] = computed
-
-    print(f"conditioning_cache_store: key={cache_key}, prep_ms={elapsed_ms:.1f}")
-    return computed
-
-
-def _disable_autocast_after_runtime_error(exc: RuntimeError) -> bool:
-    precision_state = get_precision_state()
-    if not precision_state["autocast_enabled"]:
-        return False
-
-    precision_state["autocast_enabled"] = False
-    precision_state["effective_precision"] = "fp32"
-    precision_state["runtime_fallback_triggered"] = True
-    print(
-        "FP16 autocast failed with RuntimeError; retrying current chunk in fp32 "
-        "and disabling autocast for this process."
-    )
-    print(f"Autocast failure reason: {format_log_preview(str(exc), limit=200)}")
-    return True
-
-
 def get_sample_rate() -> int:
-    _, xtts_config = get_runtime()
-    return int(xtts_config.audio.sample_rate)
+    runtime = get_runtime()
+    return int(runtime["sample_rate"])
 
 
-def normalize_language_code(language: str) -> str:
-    lang = (language or "en").strip().lower()
-    if not lang:
-        return "en"
-    if lang == "zh-cn":
-        return "zh"
-    return lang.split("-")[0]
-
-
-def resolve_chunk_length(language: str) -> int:
-    normalized_language = normalize_language_code(language)
-    tokenizer_limit = TOKENIZER_CHAR_LIMITS.get(normalized_language)
-
-    base_limit = DEFAULT_CHUNK_LENGTH
-    if tokenizer_limit is not None:
-        base_limit = min(base_limit, max(1, tokenizer_limit - 1))
-
-    return max(1, base_limit)
+def resolve_chunk_length(_language: str) -> int:
+    return max(1, int(DEFAULT_CHUNK_LENGTH))
 
 
 def split_long_sentence(sentence: str, max_length: int) -> List[str]:
@@ -557,43 +232,41 @@ def create_silence_bytes(duration_ms: int, sample_rate: int) -> bytes:
     return np.zeros(silence_samples, dtype=np.int16).tobytes()
 
 
-def extract_audio_array(outputs) -> np.ndarray:
-    if isinstance(outputs, dict):
-        wav = outputs["wav"]
-        audio = wav.cpu().numpy() if hasattr(wav, "cpu") else wav
-    elif hasattr(outputs, "cpu"):
-        audio = outputs.cpu().numpy()
-    else:
-        audio = outputs
+def extract_audio_array(audio: Any) -> np.ndarray:
+    if hasattr(audio, "cpu"):
+        audio = audio.cpu().numpy()
 
-    if audio.ndim > 1:
-        audio = audio.mean(axis=1)
-
-    return audio.astype(np.float32)
+    audio_array = np.asarray(audio, dtype=np.float32)
+    if audio_array.ndim > 1:
+        audio_array = audio_array.mean(axis=1)
+    return audio_array.astype(np.float32)
 
 
-def synthesize_chunk(
-    model: Any, chunk: str, language: str, conditioning: tuple[Any, Any], synthesis_kwargs: dict
-) -> np.ndarray:
-    try:
-        outputs = _synthesize_chunk_once(
-            model=model,
-            chunk=chunk,
-            language=language,
-            conditioning=conditioning,
-            synthesis_kwargs=synthesis_kwargs,
-        )
-    except RuntimeError as exc:
-        if not _disable_autocast_after_runtime_error(exc):
-            raise
-        outputs = _synthesize_chunk_once(
-            model=model,
-            chunk=chunk,
-            language=language,
-            conditioning=conditioning,
-            synthesis_kwargs=synthesis_kwargs,
-        )
-    return extract_audio_array(outputs)
+def _synthesize_chunk_once(chunk: str, voice_selection: dict) -> np.ndarray:
+    runtime = get_runtime()
+    pipeline_key = voice_selection["pipeline"]
+    pipeline = runtime["pipelines"].get(pipeline_key)
+    if pipeline is None:
+        raise RuntimeError(f"Pipeline '{pipeline_key}' is not initialized for voice_id={voice_selection['id']}")
+
+    voice_id = voice_selection["voice_id"]
+    speed = float(DEFAULT_SYNTHESIS_KWARGS.get("speed", 1.0))
+
+    parts: list[np.ndarray] = []
+    generator = pipeline(chunk, voice=voice_id, speed=speed)
+    for _gs, _ps, audio in generator:
+        normalized = extract_audio_array(audio)
+        if normalized.size > 0:
+            parts.append(normalized)
+
+    if not parts:
+        return np.zeros(0, dtype=np.float32)
+
+    return np.concatenate(parts).astype(np.float32, copy=False)
+
+
+def synthesize_chunk(chunk: str, voice_selection: dict) -> np.ndarray:
+    return _synthesize_chunk_once(chunk=chunk, voice_selection=voice_selection)
 
 
 def generate_audio_chunks(
@@ -603,14 +276,13 @@ def generate_audio_chunks(
     progress_callback: Optional[ProgressCallback] = None,
     cancel_event: threading.Event | None = None,
 ) -> Iterator[bytes]:
-    model, xtts_config = get_runtime()
-    sample_rate = int(xtts_config.audio.sample_rate)
+    _ = language  # language is validated at preparation stage and fixed to English in v1.
+
+    sample_rate = get_sample_rate()
     overlap_samples = int(sample_rate * STREAM_CROSSFADE_MS / 1000)
     fade_samples = int(sample_rate * 0.01)
-    synthesis_kwargs = dict(DEFAULT_SYNTHESIS_KWARGS)
     inter_chunk_pause_ms = int(DEFAULT_INTER_CHUNK_PAUSE_MS)
     inter_chunk_pause_bytes = create_silence_bytes(inter_chunk_pause_ms, sample_rate)
-    conditioning = get_voice_conditioning(model, xtts_config, voice_selection)
 
     if len(text_chunks) == 0:
         return
@@ -618,56 +290,59 @@ def generate_audio_chunks(
     total_chunks = len(text_chunks)
 
     print(
-        f"Using {voice_selection['source_type']} voice: "
-        f"{voice_selection['id']} ({voice_selection['name']})"
+        f"Using Kokoro voice: {voice_selection['id']} ({voice_selection['name']})"
     )
 
     pending_audio: Optional[np.ndarray] = None
     pending_text_chunk: Optional[str] = None
 
-    with torch.inference_mode():
-        for i, chunk in enumerate(text_chunks):
-            if cancel_event is not None and cancel_event.is_set():
-                raise GenerationCancelledError("Generation was cancelled.")
-            print(f"Generating chunk {i + 1}/{len(text_chunks)}")
-            audio_float = np.clip(
-                synthesize_chunk(model, chunk, language, conditioning, synthesis_kwargs), -1.0, 1.0
-            ).astype(np.float32)
-            if progress_callback is not None:
-                progress_callback(i + 1, total_chunks)
-            if len(audio_float) == 0:
-                continue
+    for i, chunk in enumerate(text_chunks):
+        if cancel_event is not None and cancel_event.is_set():
+            raise GenerationCancelledError("Generation was cancelled.")
 
-            if pending_audio is None:
-                pending_audio = apply_edge_fade(
-                    audio_float, fade_samples, fade_in=True, fade_out=False
-                )
-                pending_text_chunk = chunk
-                continue
+        print(f"Generating chunk {i + 1}/{len(text_chunks)}")
+        audio_float = np.clip(
+            synthesize_chunk(chunk=chunk, voice_selection=voice_selection),
+            -1.0,
+            1.0,
+        ).astype(np.float32)
 
-            boundary_has_sentence_pause = bool(
-                inter_chunk_pause_bytes
-                and pending_text_chunk
-                and ends_with_sentence_boundary(pending_text_chunk)
+        if progress_callback is not None:
+            progress_callback(i + 1, total_chunks)
+
+        if len(audio_float) == 0:
+            continue
+
+        if pending_audio is None:
+            pending_audio = apply_edge_fade(
+                audio_float, fade_samples, fade_in=True, fade_out=False
             )
-
-            if boundary_has_sentence_pause:
-                finalized_audio = apply_edge_fade(
-                    pending_audio, fade_samples, fade_in=False, fade_out=True
-                )
-                if len(finalized_audio) > 0:
-                    yield float_audio_to_int16_bytes(finalized_audio) + inter_chunk_pause_bytes
-                pending_audio = apply_edge_fade(
-                    audio_float, fade_samples, fade_in=True, fade_out=False
-                )
-            else:
-                finalized_audio, pending_audio = crossfade_chunks(
-                    pending_audio, audio_float, overlap_samples
-                )
-                if len(finalized_audio) > 0:
-                    yield float_audio_to_int16_bytes(finalized_audio)
-
             pending_text_chunk = chunk
+            continue
+
+        boundary_has_sentence_pause = bool(
+            inter_chunk_pause_bytes
+            and pending_text_chunk
+            and ends_with_sentence_boundary(pending_text_chunk)
+        )
+
+        if boundary_has_sentence_pause:
+            finalized_audio = apply_edge_fade(
+                pending_audio, fade_samples, fade_in=False, fade_out=True
+            )
+            if len(finalized_audio) > 0:
+                yield float_audio_to_int16_bytes(finalized_audio) + inter_chunk_pause_bytes
+            pending_audio = apply_edge_fade(
+                audio_float, fade_samples, fade_in=True, fade_out=False
+            )
+        else:
+            finalized_audio, pending_audio = crossfade_chunks(
+                pending_audio, audio_float, overlap_samples
+            )
+            if len(finalized_audio) > 0:
+                yield float_audio_to_int16_bytes(finalized_audio)
+
+        pending_text_chunk = chunk
 
     if pending_audio is not None and len(pending_audio) > 0:
         pending_audio = apply_edge_fade(pending_audio, fade_samples, fade_in=False, fade_out=True)
@@ -713,6 +388,7 @@ def generate_tts(
         voice_id=voice_id,
         language=language,
     )
+
     audio_chunks = []
     for audio_bytes in generate_audio_chunks(
         text_chunks=text_chunks,

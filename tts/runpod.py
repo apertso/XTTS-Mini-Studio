@@ -14,7 +14,7 @@ from .core import generate_tts
 configure_stdio()
 
 DEFAULT_MAX_INLINE_AUDIO_BYTES = 6_500_000
-DEFAULT_UPLOAD_PREFIX = "xtts-audio"
+DEFAULT_UPLOAD_PREFIX = "kokoro-audio"
 DEFAULT_UPLOAD_BUCKET_NAME = ""
 
 
